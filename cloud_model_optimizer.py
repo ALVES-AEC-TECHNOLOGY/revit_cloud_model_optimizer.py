@@ -28,7 +28,7 @@ rvt_unloaded = 0
 links_removed = 0
 total_purged = 0
 
-TARGET_NAMES = ["3D EMISSÃO", "3D NAVIS"]
+TARGET_NAMES = ["3D EMISSAO", "3D NAVIS"]
 created_elements_ids = HashSet[ElementId]()
 
 # =========================================================================
@@ -66,7 +66,7 @@ for v_id in view_ids:
             continue
             
         if view.IsTemplate:
-            v_name_upper = view.Name.upper()
+            v_name_upper = view.Name.upper().replace("CAO", "CAO").replace("CCAO", "CAO")
             if not any(target in v_name_upper for target in TARGET_NAMES):
                 doc.Delete(v_id)
                 templates_deleted += 1
@@ -78,9 +78,9 @@ for v_id in view_ids:
         ]
         
         if view.ViewType in valid_view_types:
-            v_name_upper = view.Name.upper()
+            v_name_upper = view.Name.upper().replace("ISSAO", "ISSAO")
             
-            if any(target in v_name_upper for target in TARGET_NAMES):
+            if "3D EMIS" in v_name_upper or "3D NAVIS" in v_name_upper:
                 created_elements_ids.Add(v_id)
                 continue 
                 
@@ -181,7 +181,7 @@ try:
     all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
     
     for name in TARGET_NAMES:
-        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
+        view_3d = next((v for v in existing_3d_views if v.Name.upper().replace("ISSAO", "ISSAO") == name), None)
         
         if not view_3d and view_3d_family_type:
             view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
@@ -189,7 +189,7 @@ try:
             
         if view_3d:
             created_elements_ids.Add(view_3d.Id)
-            template = next((t for t in all_templates if t.Name.upper() == name), None)
+            template = next((t for t in all_templates if t.Name.upper().replace("ISSAO", "ISSAO") == name), None)
             
             if not template:
                 template = view_3d.CreateViewTemplate()
@@ -238,4 +238,4 @@ while loop_safety < max_loops:
 # =========================================================================
 # OUTPUT DIRECT ASSIGNMENT
 # =========================================================================
-OUT = "PIPELINE SUCCESSFUL"
+OUT = "SUCCESS"
