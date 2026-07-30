@@ -61,18 +61,7 @@ def apply_strict_filters(document, view_or_template):
 TransactionManager.Instance.EnsureInTransaction(doc)
 
 # ---------------------------------------------------------------------
-# PASSO 1: MAPEAMENTO RIGOROSO DE FOLHAS (SHEETS)
-# ---------------------------------------------------------------------
-placed_view_ids = HashSet[ElementId]()
-try:
-    sheets_collector = FilteredElementCollector(doc).OfClass(ViewSheet).ToElements()
-    for sheet in sheets_collector:
-        for v_id in sheet.GetAllPlacedViews():
-            placed_view_ids.Add(v_id)
-except: pass
-
-# ---------------------------------------------------------------------
-# PASSO 2: CRIAÇÃO/GARANTIA DAS VISTAS 3D E SEUS RESPECTIVOS TEMPLATES
+# PASSO 1: CRIAÇÃO/GARANTIA DAS VISTAS 3D E SEUS RESPECTIVOS TEMPLATES
 # ---------------------------------------------------------------------
 created_elements_ids = HashSet[ElementId]()
 try:
@@ -105,10 +94,10 @@ try:
 except: pass
 
 # ---------------------------------------------------------------------
-# PASSO 3: VARREDURA E DELEÇÃO SELETIVA DE TODAS AS VISTAS FORA DE FOLHAS
+# PASSO 2: VARREDURA POR STRING E CORRESPONDÊNCIA DE FOLHA (DELEÇÃO DE VISTAS)
 # ---------------------------------------------------------------------
 try:
-    # Tipos de vistas gráficos legítimos que queremos varrer (2D e 3D)
+    # Tipos gráficos legítimos que devem ser analisados para deleção
     valid_view_types = [
         ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, 
         ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan
@@ -119,23 +108,37 @@ try:
         try:
             v_id = view.Id
             
-            # Se for um View Template antigo/inútil, deleta (protegendo os novos criados no Passo 2)
+            # Se for um View Template antigo/inútil, deleta (protegendo os do Passo 1)
             if view.IsTemplate:
                 if v_id not in created_elements_ids:
                     doc.Delete(v_id)
                     templates_deleted += 1
                 continue
 
-            # Filtra apenas para analisar vistas gráficas reais de projeto
+            # Analisar apenas vistas gráficas reais de projeto (2D e 3D)
             if view.ViewType in valid_view_types:
                 v_name_upper = view.Name.upper()
                 
-                # Se for uma das duas vistas 3D protegidas, ignora e não deleta de jeito nenhum
+                # Se for uma das duas vistas 3D protegidas, ignora imediatamente
                 if v_id in created_elements_ids or any(target in v_name_upper for target in TARGET_NAMES):
                     continue
                 
-                # Se a vista NÃO está em nenhuma folha, ela deve ser deletada
-                if v_id not in placed_view_ids:
+                # CHECAGEM CIRÚRGICA POR CORRESPONDÊNCIA DE FOLHA (NUMBER / NAME)
+                # Pega os parâmetros nativos do Revit que indicam o vínculo com prancha
+                param_sheet_num = view.get_Parameter(BuiltInParameter.VIEWER_SHEET_NUMBER)
+                param_sheet_name = view.get_Parameter(BuiltInParameter.VIEWER_SHEET_NAME)
+                
+                sheet_num = param_sheet_num.AsString() if param_sheet_num else None
+                sheet_name = param_sheet_name.AsString() if param_sheet_name else None
+                
+                # Se os parâmetros não existirem, forem nulos, vazios ou contiverem "-", a vista está fora da folha
+                is_on_sheet = True
+                if not sheet_num or sheet_num == "" or sheet_num == "---" or sheet_num == "-":
+                    if not sheet_name or sheet_name == "" or sheet_name == "---" or sheet_name == "-":
+                        is_on_sheet = False
+                
+                # Se for comprovado que não tem correspondência em folha, passa o rodo
+                if not is_on_sheet:
                     if view.CanBeDeleted():
                         doc.Delete(v_id)
                         views_deleted += 1
@@ -143,7 +146,7 @@ try:
 except: pass
 
 # ---------------------------------------------------------------------
-# PASSO 4: DELEÇÃO DE GRUPOS DO BROWSER
+# PASSO 3: DELEÇÃO DE GRUPOS DO BROWSER
 # ---------------------------------------------------------------------
 try:
     group_ids = FilteredElementCollector(doc).OfClass(GroupType).ToElementIds()
@@ -155,7 +158,7 @@ try:
 except: pass
 
 # ---------------------------------------------------------------------
-# PASSO 5: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
+# PASSO 4: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
 # ---------------------------------------------------------------------
 try:
     rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
@@ -238,21 +241,9 @@ while loop_safety < max_loops:
 report_log = [
     "🔥 ALVES AEC TECH - DEEP DELIVERY PURGE COMPLETED 🔥",
     "-"*60,
-    "• Vistas 2D (Fora de folha) e 3Ds inúteis excluídas: {}".format(views_deleted),
+    "• Vistas 2D (Sem correspondência em folha) e 3Ds obsoletas excluídas: {}".format(views_deleted),
     "• View Templates obsoletos destruídos: {}".format(templates_deleted),
     "• Model & Detail Groups limpos do Browser: {}".format(groups_deleted),
     "• Vínculos .RVT descarregados (Server RAM protegida): {}".format(rvt_unloaded),
     "• Vínculos rígidos apagados (DWG/CAD/IFC/Coordination): {}".format(links_removed),
     "• Elementos órfãos eliminados via Deep Purge: {}".format(total_purged),
-    "• Ciclos de otimização de banco de dados executados: {}".format(loop_safety),
-    "-"*60,
-    "• CRIAÇÃO E STATUS DAS ENTREGAS:",
-    "  [+] Vista 3D EMISSÃO & View Template EMISSÃO -> Ativos e Configurados",
-    "  [+] Vista 3D NAVIS & View Template NAVIS -> Ativos e Configurados",
-    "  [✔️] Crop Box Desativado | Categoria Annotation Oculta",
-    "  [✔️] Todos os Worksets com '(HIDE)' no nome foram forçados para Invisível",
-    "-"*60,
-    "Pronto para upload em nuvem e auditoria de modelo!"
-]
-
-OUT = "\n".join(report_log)
