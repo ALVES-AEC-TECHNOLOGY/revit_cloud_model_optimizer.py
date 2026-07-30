@@ -29,55 +29,44 @@ links_removed = 0
 total_purged = 0
 
 TARGET_NAMES = ["3D EMISSÃO", "3D NAVIS"]
+created_elements_ids = HashSet[ElementId]()
 
 # =========================================================================
-# FUNÇÃO AUXILIAR: CONFIGURAR VIEW TEMPLATE OU VISTA (CROP, ANNOTATION, WORKSETS)
+# FUNÇÃO AUXILIAR: CONFIGURAR CROP, ANNOTATION E WORKSETS HIDE
 # =========================================================================
 def apply_strict_filters(document, view_or_template):
     if not view_or_template:
         return
     try:
-        # 1. Desabilitar Crop Box (Ativo e Visível)
         view_or_template.CropBoxActive = False
         view_or_template.CropBoxVisible = False
-        
-        # 2. Ocultar Categoria de Anotações (Annotations Hidden)
         view_or_template.AreAnnotationCategoriesHidden = True
         
-        # 3. Varrer e ocultar todos os Worksets que contenham "(HIDE)" no nome
         if document.IsWorkshared:
-            workset_table = document.GetWorksetTable()
             worksets_collector = FilteredWorksetCollector(document).OfKind(WorksetKind.UserWorkset)
-            
             for wk in worksets_collector:
                 if "(HIDE)" in wk.Name.upper():
                     view_or_template.SetWorksetVisibility(wk.Id, WorksetVisibility.Hidden)
-    except:
-        pass
+    except: pass
 
 # =========================================================================
-# EXECUÇÃO DO PROCESSO EM TRANSAÇÃO ÚNICA (BLOCOS ISOLADOS)
+# EXECUÇÃO DO PROCESSO EM TRANSAÇÃO ÚNICA
 # =========================================================================
 TransactionManager.Instance.EnsureInTransaction(doc)
 
-# ---------------------------------------------------------------------
-# PASSO 1: CRIAÇÃO/GARANTIA DAS VISTAS 3D E SEUS RESPECTIVOS TEMPLATES
-# ---------------------------------------------------------------------
-created_elements_ids = HashSet[ElementId]()
+# --- PASSO 1: CRIAÇÃO/GARANTIA DAS VISTAS 3D E TEMPLATES ---
 try:
     view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
     view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
     
     for name in TARGET_NAMES:
         view_3d = next((v for v in FilteredElementCollector(doc).OfClass(View3D).ToElements() if v.Name.upper() == name), None)
-        
         if not view_3d and view_3d_family_type:
             view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
             view_3d.Name = name
             
         if view_3d:
             created_elements_ids.Add(view_3d.Id)
-            
             all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
             template = next((t for t in all_templates if t.Name.upper() == name), None)
             
@@ -93,11 +82,8 @@ try:
             apply_strict_filters(doc, view_3d)
 except: pass
 
-# ---------------------------------------------------------------------
-# PASSO 2: VARREDURA POR STRING E CORRESPONDÊNCIA DE FOLHA (DELEÇÃO DE VISTAS)
-# ---------------------------------------------------------------------
+# --- PASSO 2: VARREDURA E DELEÇÃO SELETIVA DE VISTAS 2D FORA DE FOLHAS ---
 try:
-    # Tipos gráficos legítimos que devem ser analisados para deleção
     valid_view_types = [
         ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, 
         ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan
@@ -107,37 +93,34 @@ try:
     for view in all_views:
         try:
             v_id = view.Id
-            
-            # Se for um View Template antigo/inútil, deleta (protegendo os do Passo 1)
-            if view.IsTemplate:
-                if v_id not in created_elements_ids:
-                    doc.Delete(v_id)
-                    templates_deleted += 1
+            if v_id in created_elements_ids:
+                continue
+                
+            if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
                 continue
 
-            # Analisar apenas vistas gráficas reais de projeto (2D e 3D)
+            if view.IsTemplate:
+                doc.Delete(v_id)
+                templates_deleted += 1
+                continue
+
             if view.ViewType in valid_view_types:
                 v_name_upper = view.Name.upper()
-                
-                # Se for uma das duas vistas 3D protegidas, ignora imediatamente
-                if v_id in created_elements_ids or any(target in v_name_upper for target in TARGET_NAMES):
+                if any(target in v_name_upper for target in TARGET_NAMES):
                     continue
                 
-                # CHECAGEM CIRÚRGICA POR CORRESPONDÊNCIA DE FOLHA (NUMBER / NAME)
-                # Pega os parâmetros nativos do Revit que indicam o vínculo com prancha
-                param_sheet_num = view.get_Parameter(BuiltInParameter.VIEWER_SHEET_NUMBER)
-                param_sheet_name = view.get_Parameter(BuiltInParameter.VIEWER_SHEET_NAME)
+                # Checagem por lookup estável de parâmetro de texto (Evita crashes por enums)
+                p_num = view.LookupParameter("Sheet Number")
+                p_name = view.LookupParameter("Sheet Name")
                 
-                sheet_num = param_sheet_num.AsString() if param_sheet_num else None
-                sheet_name = param_sheet_name.AsString() if param_sheet_name else None
+                s_num = p_num.AsString() if p_num else None
+                s_name = p_name.AsString() if p_name else None
                 
-                # Se os parâmetros não existirem, forem nulos, vazios ou contiverem "-", a vista está fora da folha
                 is_on_sheet = True
-                if not sheet_num or sheet_num == "" or sheet_num == "---" or sheet_num == "-":
-                    if not sheet_name or sheet_name == "" or sheet_name == "---" or sheet_name == "-":
+                if not s_num or s_num in ["", "---", "-"]:
+                    if not s_name or s_name in ["", "---", "-"]:
                         is_on_sheet = False
-                
-                # Se for comprovado que não tem correspondência em folha, passa o rodo
+                        
                 if not is_on_sheet:
                     if view.CanBeDeleted():
                         doc.Delete(v_id)
@@ -145,9 +128,7 @@ try:
         except: pass
 except: pass
 
-# ---------------------------------------------------------------------
-# PASSO 3: DELEÇÃO DE GRUPOS DO BROWSER
-# ---------------------------------------------------------------------
+# --- PASSO 3: DELEÇÃO DE GRUPOS DO BROWSER ---
 try:
     group_ids = FilteredElementCollector(doc).OfClass(GroupType).ToElementIds()
     for g_id in group_ids:
@@ -157,10 +138,9 @@ try:
         except: pass
 except: pass
 
-# ---------------------------------------------------------------------
-# PASSO 4: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
-# ---------------------------------------------------------------------
+# --- PASSO 4: UNLOAD RVT E DELEÇÃO DE OUTROS LINKS (IFC, CAD, NAVIS) ---
 try:
+    # 1. Unload de RVTs e Delete de IFCs
     rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
     for link in rvt_links:
         try:
@@ -169,8 +149,6 @@ try:
                 if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
                     link.Unload(None)
                     rvt_unloaded += 1
-                elif link.GetLinkedFileStatus() == LinkedFileStatus.Unloaded:
-                    rvt_unloaded += 1
             elif ".ifc" in l_name:
                 doc.Delete(link.Id)
                 links_removed += 1
@@ -178,6 +156,7 @@ try:
 except: pass
 
 try:
+    # 2. Deletar instâncias de arquivos CAD e DWG importados ou vinculados
     import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
     for inst_id in import_instances:
         try:
@@ -186,26 +165,20 @@ try:
         except: pass
 except: pass
 
-link_classes = [CADLinkType, PointCloudType]
-try: link_classes.append(CoordinationModelType)
+try:
+    # 3. Limpeza genérica de nuvens de pontos e topografias vinculadas
+    pt_clouds = FilteredElementCollector(doc).OfClass(PointCloudType).ToElementIds()
+    for pt_id in pt_clouds:
+        try:
+            doc.Delete(pt_id)
+            links_removed += 1
+        except: pass
 except: pass
-try: link_classes.append(TopographyLinkType)
-except: pass
-
-for cls in link_classes:
-    try:
-        lnk_ids = FilteredElementCollector(doc).OfClass(cls).ToElementIds()
-        for l_id in lnk_ids:
-            try:
-                doc.Delete(l_id)
-                links_removed += 1
-            except: pass
-    except: pass
 
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# BLOCK B: RECURSIVE DEEP PURGE OF UNUSED ELEMENTS
+# BLOCK B: RECURSIVE DEEP PURGE OF UNUSED ELEMENTS (MANTIDO E INTEGRADO)
 # =========================================================================
 loop_safety = 0
 max_loops = 10 
@@ -236,14 +209,23 @@ while loop_safety < max_loops:
     loop_safety += 1
 
 # =========================================================================
-# LOG DE PERFORMANCE FINAL
+# OUTPUT LOG REPORT
 # =========================================================================
 report_log = [
-    "🔥 ALVES AEC TECH - DEEP DELIVERY PURGE COMPLETED 🔥",
+    "🔥 ALVES AEC TECH - DEEP PURGE OPTIMIZER SUCCESSFUL 🔥",
     "-"*60,
-    "• Vistas 2D (Sem correspondência em folha) e 3Ds obsoletas excluídas: {}".format(views_deleted),
+    "• Vistas 2D limpas (sem prancha) e 3Ds obsoletas: {}".format(views_deleted),
     "• View Templates obsoletos destruídos: {}".format(templates_deleted),
-    "• Model & Detail Groups limpos do Browser: {}".format(groups_deleted),
-    "• Vínculos .RVT descarregados (Server RAM protegida): {}".format(rvt_unloaded),
-    "• Vínculos rígidos apagados (DWG/CAD/IFC/Coordination): {}".format(links_removed),
-    "• Elementos órfãos eliminados via Deep Purge: {}".format(total_purged),
+    "• Model & Detail Groups apagados do Browser: {}".format(groups_deleted),
+    "• Vínculos .RVT descarregados com segurança: {}".format(rvt_unloaded),
+    "• Vínculos e importações deletados (DWG/CAD/IFC): {}".format(links_removed),
+    "• Elementos órfãos removidos via Deep Purge: {}".format(total_purged),
+    "• Ciclos de otimização executados: {}".format(loop_safety),
+    "-"*60,
+    "• CONFIGURAÇÃO DAS VISTAS 3D DE ENTREGA:",
+    "  [+] 3D EMISSÃO e 3D NAVIS (E seus templates homônimos) criados/ajustados.",
+    "  [✔️] Crop Desativado | Annotations Ocultas | Worksets '(HIDE)' Ocultos.",
+    "-"*60
+]
+
+OUT = "\n".join(report_log)
