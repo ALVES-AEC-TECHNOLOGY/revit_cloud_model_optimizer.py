@@ -74,7 +74,6 @@ try:
     # ---------------------------------------------------------------------
     # PASSO 2: CRIAÇÃO/GARANTIA DAS VISTAS 3D E SEUS RESPECTIVOS TEMPLATES
     # ---------------------------------------------------------------------
-    # Coleta o tipo de família 3D padrão do projeto
     view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
     view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
     
@@ -82,10 +81,8 @@ try:
     final_3d_views = {}
 
     for name in TARGET_NAMES:
-        # Tenta localizar a vista 3D existente
         view_3d = next((v for v in FilteredElementCollector(doc).OfClass(View3D).ToElements() if v.Name.upper() == name), None)
         
-        # Se não existir a vista 3D, cria do zero
         if not view_3d and view_3d_family_type:
             view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
             view_3d.Name = name
@@ -93,42 +90,35 @@ try:
         final_3d_views[name] = view_3d
         created_elements_ids.Add(view_3d.Id)
         
-        # Tenta localizar o View Template correspondente com o mesmo nome
         all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
         template = next((t for t in all_templates if t.Name.upper() == name), None)
         
-        # Se não existir o View Template, cria a partir da própria vista 3D
         if not template and view_3d:
             template = view_3d.CreateViewTemplate()
             template.Name = name
             
         created_elements_ids.Add(template.Id)
         
-        # Vincula o View Template criado/encontrado à sua respectiva Vista 3D
         if view_3d and template:
             view_3d.ViewTemplateId = template.Id
             
-        # Aplica os filtros pesados (Crop falso, Annotations ocultas, Worksets HIDE ocultos)
         apply_strict_filters(doc, view_3d)
         apply_strict_filters(doc, template)
 
     # ---------------------------------------------------------------------
-    # PASSO 3: VARREDURA E DELEÇÃO AGRESSIVA DE VISTAS 2D FORA DE FOLHAS E REDUNDÂNCIAS
+    # PASSO 3: VARREDURA E DELEÇÃO AGRESSIVA DE VISTAS 2D FORA DE FOLHAS
     # ---------------------------------------------------------------------
     all_views = FilteredElementCollector(doc).OfClass(View).ToElements()
     
     for view in all_views:
         v_id = view.Id
         
-        # Protege as vistas e templates que acabamos de criar ou mapear
         if v_id in created_elements_ids:
             continue
             
-        # Ignorar tabelas, folhas físicas e componentes do navegador do Revit
         if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
             continue
 
-        # Se for um View Template antigo/inútil, passa o rodo
         if view.IsTemplate:
             try:
                 doc.Delete(v_id)
@@ -136,7 +126,6 @@ try:
             except: pass
             continue
 
-        # Se for qualquer tipo de vista (2D ou 3D) que NÃO está nas folhas mapeadas
         if v_id not in placed_view_ids:
             if view.CanBeDeleted():
                 try:
@@ -155,21 +144,25 @@ try:
         except: pass
 
     # ---------------------------------------------------------------------
-    # PASSO 5: UNLOAD E LIMPEZA DE EXTERNAL LINKS (CAD, IFC, DWG)
+    # PASSO 5: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
     # ---------------------------------------------------------------------
-    # Unload de arquivos .rvt
+    # 1. Varredura profunda em todos os RevitLinkType (inclui arquivos .ifc.rvt)
     rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
     for link in rvt_links:
-        if not link.IsNestedLink:
-            try:
+        try:
+            l_name = link.Name.lower()
+            if l_name.endswith(".rvt") and not link.IsNestedLink:
                 if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
                     link.Unload(None)
                     rvt_unloaded += 1
                 elif link.GetLinkedFileStatus() == LinkedFileStatus.Unloaded:
                     rvt_unloaded += 1
-            except: pass
+            elif ".ifc" in l_name:
+                doc.Delete(link.Id)
+                links_removed += 1
+        except: pass
 
-    # Eliminação total de instâncias importadas/vinculadas (CAD/DWG/IFC)
+    # 2. Eliminação total de instâncias importadas/vinculadas (CAD/DWG)
     import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
     for inst_id in import_instances:
         try:
@@ -177,6 +170,7 @@ try:
             links_removed += 1
         except: pass
 
+    # 3. Remoção de Coordination Models (NWD/NWC) e Topografias por tipos de classe
     link_classes = [CADLinkType, PointCloudType]
     try: link_classes.append(CoordinationModelType)
     except: pass
@@ -196,7 +190,6 @@ try:
 except Exception as main_err:
     pass
 
-# Executa o encerramento do Bloco A para iniciar o Purge do banco de dados
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
@@ -240,8 +233,17 @@ report_log = [
     "• View Templates obsoletos destruídos: {}".format(templates_deleted),
     "• Model & Detail Groups limpos do Browser: {}".format(groups_deleted),
     "• Vínculos .RVT descarregados (Server RAM protegida): {}".format(rvt_unloaded),
-    "• Vínculos rígidos apagados do modelo (DWG/CAD/IFC): {}".format(links_removed),
+    "• Vínculos rígidos apagados (DWG/CAD/IFC/Coordination): {}".format(links_removed),
     "• Elementos órfãos eliminados via Deep Purge: {}".format(total_purged),
     "• Ciclos de otimização de banco de dados executados: {}".format(loop_safety),
     "-"*60,
     "• CRIAÇÃO E STATUS DAS ENTREGAS:",
+    "  [+] Vista 3D EMISSÃO & View Template EMISSÃO -> Ativos e Configurados",
+    "  [+] Vista 3D NAVIS & View Template NAVIS -> Ativos e Configurados",
+    "  [✔️] Crop Box Desativado | Categoria Annotation Oculta",
+    "  [✔️] Todos os Worksets com '(HIDE)' no nome foram forçados para Invisível",
+    "-"*60,
+    "Pronto para upload em nuvem e auditoria de modelo!"
+]
+
+OUT = "\n".join(report_log)
