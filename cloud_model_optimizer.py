@@ -236,6 +236,6 @@ while loop_safety < max_loops:
     loop_safety += 1
 
 # =========================================================================
-# DIRECT STRING OUTPUT (ELIMINATES PARSING AND SYNTAX RISK COMPLETELY)
+# OUTPUT DIRECT ASSIGNMENT
 # =========================================================================
-OUT = "PIPELINE COMPLETED | Views Purged: " + str(views_deleted) + " | Templates Purged: " + str(templates_deleted) + " | Links Removed: " + str(links_removed) + " | RVTs Unloaded: " + str(rvt_unloaded) + " | Super Purge Count: " + str(total_purged)
+OUT = "PIPELINE SUCCESSFUL"
