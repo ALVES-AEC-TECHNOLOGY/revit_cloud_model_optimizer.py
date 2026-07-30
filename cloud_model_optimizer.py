@@ -109,7 +109,7 @@ try:
                 if any(target in v_name_upper for target in TARGET_NAMES):
                     continue
                 
-                # Checagem por lookup estável de parâmetro de texto (Evita crashes por enums)
+                # Checagem por lookup estável de parâmetro de texto
                 p_num = view.LookupParameter("Sheet Number")
                 p_name = view.LookupParameter("Sheet Name")
                 
@@ -140,7 +140,6 @@ except: pass
 
 # --- PASSO 4: UNLOAD RVT E DELEÇÃO DE OUTROS LINKS (IFC, CAD, NAVIS) ---
 try:
-    # 1. Unload de RVTs e Delete de IFCs
     rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
     for link in rvt_links:
         try:
@@ -156,7 +155,6 @@ try:
 except: pass
 
 try:
-    # 2. Deletar instâncias de arquivos CAD e DWG importados ou vinculados
     import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
     for inst_id in import_instances:
         try:
@@ -166,7 +164,6 @@ try:
 except: pass
 
 try:
-    # 3. Limpeza genérica de nuvens de pontos e topografias vinculadas
     pt_clouds = FilteredElementCollector(doc).OfClass(PointCloudType).ToElementIds()
     for pt_id in pt_clouds:
         try:
@@ -178,7 +175,7 @@ except: pass
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# BLOCK B: RECURSIVE DEEP PURGE OF UNUSED ELEMENTS (MANTIDO E INTEGRADO)
+# BLOCK B: RECURSIVE DEEP PURGE OF UNUSED ELEMENTS
 # =========================================================================
 loop_safety = 0
 max_loops = 10 
@@ -209,23 +206,23 @@ while loop_safety < max_loops:
     loop_safety += 1
 
 # =========================================================================
-# OUTPUT LOG REPORT
+# OUTPUT LOG REPORT (SINTAXE CORRIGIDA COM F-STRINGS)
 # =========================================================================
 report_log = [
     "🔥 ALVES AEC TECH - DEEP PURGE OPTIMIZER SUCCESSFUL 🔥",
-    "-"*60,
-    "• Vistas 2D limpas (sem prancha) e 3Ds obsoletas: {}".format(views_deleted),
-    "• View Templates obsoletos destruídos: {}".format(templates_deleted),
-    "• Model & Detail Groups apagados do Browser: {}".format(groups_deleted),
-    "• Vínculos .RVT descarregados com segurança: {}".format(rvt_unloaded),
-    "• Vínculos e importações deletados (DWG/CAD/IFC): {}".format(links_removed),
-    "• Elementos órfãos removidos via Deep Purge: {}".format(total_purged),
-    "• Ciclos de otimização executados: {}".format(loop_safety),
-    "-"*60,
-    "• CONFIGURAÇÃO DAS VISTAS 3D DE ENTREGA:",
-    "  [+] 3D EMISSÃO e 3D NAVIS (E seus templates homônimos) criados/ajustados.",
+    "------------------------------------------------------------",
+    f"• Vistas 2D limpas (sem prancha) e 3Ds obsoletas: {views_deleted}",
+    f"• View Templates obsoletos destruídos: {templates_deleted}",
+    f"• Model & Detail Groups apagados do Browser: {groups_deleted}",
+    f"• Vínculos .RVT descarregados com segurança: {rvt_unloaded}",
+    f"• Vínculos e importações deletados (DWG/CAD/IFC): {links_removed}",
+    f"• Elementos orfaos removidos via Deep Purge: {total_purged}",
+    f"• Ciclos de otimizacao executados: {loop_safety}",
+    "------------------------------------------------------------",
+    "• CONFIGURACAO DAS VISTAS 3D DE ENTREGA:",
+    "  [+] 3D EMISSÃO e 3D NAVIS (e seus templates) ativos/ajustados.",
     "  [✔️] Crop Desativado | Annotations Ocultas | Worksets '(HIDE)' Ocultos.",
-    "-"*60
+    "------------------------------------------------------------"
 ]
 
 OUT = "\n".join(report_log)
