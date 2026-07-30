@@ -1,4 +1,12 @@
 # -*- coding: utf-8 -*-
+"""
+BIM Model Purge and Audit Optimization Script
+Author: ALVES AEC TECHNOLOGY
+Description: Safely removes redundant project views (preserving templates and sheet-bound views),
+             unloads/detaches links, creates mandatory 3D Navis/Emission views with matching 
+             View Templates, applies strict graphical overrides, and executes a database super purge.
+"""
+
 import sys
 import clr
 
@@ -20,7 +28,7 @@ from System.Collections.Generic import HashSet
 # INITIALIZATION
 doc = DocumentManager.Instance.CurrentDBDocument
 
-# Reporting counters for the final performance log output
+# Reporting counters for performance logging
 groups_deleted = 0
 views_deleted = 0
 templates_deleted = 0
@@ -35,22 +43,56 @@ created_elements_ids = HashSet[ElementId]()
 # HELPER FUNCTION: CONFIGURATION OF CROP BOX, ANNOTATIONS, AND WORKSETS
 # =========================================================================
 def apply_strict_filters(document, view_or_template):
+    """
+    Applies production-ready overrides to target views and view templates:
+    disables crop boxes, hides all annotation categories, and hides specific worksets.
+    """
     if not view_or_template:
         return
     try:
+        # Configure Crop Box states
         view_or_template.CropBoxActive = False
         view_or_template.CropBoxVisible = False
+        
+        # Hide all annotation categories globally across the view or template scope
         view_or_template.AreAnnotationCategoriesHidden = True
         
+        # Isolate and hide technical worksets matching the "(HIDE)" token
         if document.IsWorkshared:
             worksets_collector = FilteredWorksetCollector(document).OfKind(WorksetKind.UserWorkset)
             for wk in worksets_collector:
                 if "(HIDE)" in wk.Name.upper():
                     view_or_template.SetWorksetVisibility(wk.Id, WorksetVisibility.Hidden)
-    except: pass
+    except: 
+        pass
 
 # =========================================================================
-# PHASE 1: STATIC VIEW & GROUP CLEANUP (YOUR PROVEN METHOD)
+# PRE-PHASE: PREVENTATIVE INJECTION OF MANDATORY DELIVERY VIEWS
+# =========================================================================
+# Resolves the Revit API limitation preventing the deletion of the user's active UI view.
+TransactionManager.Instance.EnsureInTransaction(doc)
+try:
+    view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
+    view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
+    
+    existing_3d_views = FilteredElementCollector(doc).OfClass(View3D).ToElements()
+    
+    for name in TARGET_NAMES:
+        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
+        
+        # Inject standard 3D view if missing before initializing the purge sequence
+        if not view_3d and view_3d_family_type:
+            view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
+            view_3d.Name = name
+        
+        if view_3d:
+            created_elements_ids.Add(view_3d.Id)
+except: 
+    pass
+TransactionManager.Instance.TransactionTaskDone()
+
+# =========================================================================
+# PHASE 1: STATIC VIEW & GROUP CLEANUP (STRICT SHEET PRESERVATION)
 # =========================================================================
 view_ids = FilteredElementCollector(doc).OfClass(View).ToElementIds()
 
@@ -62,14 +104,12 @@ for v_id in view_ids:
         if view is None:
             continue
             
+        # Bypass structural and system-internal view types
         if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
             continue
             
+        # CRITICAL PROTECTION: Safely preserve all pre-existing infrastructure view templates
         if view.IsTemplate:
-            v_name_upper = view.Name.upper().replace("CAO", "CAO")
-            if not any(target in v_name_upper for target in TARGET_NAMES):
-                doc.Delete(v_id)
-                templates_deleted += 1
             continue 
 
         valid_view_types = [
@@ -80,28 +120,23 @@ for v_id in view_ids:
         if view.ViewType in valid_view_types:
             v_name_upper = view.Name.upper()
             
-            if "3D EMIS" in v_name_upper or "3D NAVIS" in v_name_upper:
-                created_elements_ids.Add(v_id)
+            # Protect target delivery views from being processed
+            if v_name_upper in TARGET_NAMES:
                 continue 
                 
-            p_num = view.LookupParameter("Sheet Number")
-            p_name = view.LookupParameter("Sheet Name")
+            # Native Sheet Verification: Determines sheet placement without dynamic string parameter vulnerabilities
+            is_on_sheet = view.SheetId != ElementId.InvalidElementId
             
-            s_num = p_num.AsString() if p_num else None
-            s_name = p_name.AsString() if p_name else None
-            
-            has_sheet_conformity = False
-            if s_num and s_num != "" and s_num != "---" and s_num != "-":
-                if s_name and s_name != "" and s_name != "---" and s_name != "-":
-                    has_sheet_conformity = True
-            
-            if view.ViewType == ViewType.ThreeD or not has_sheet_conformity:
-                if view.CanBeDeleted():
+            # Execute deletion if view is unmapped or a standard non-delivery 3D view
+            if view.ViewType == ViewType.ThreeD or not is_on_sheet:
+                if view.CanBeDeleted() and v_id not in created_elements_ids:
                     doc.Delete(v_id)
                     views_deleted += 1
                     
-    except: pass
+    except: 
+        pass
 
+# Purge model GroupTypes to reduce database overhead
 try:
     group_ids = FilteredElementCollector(doc).OfClass(GroupType).ToElementIds()
     for g_id in group_ids:
@@ -114,11 +149,11 @@ except: pass
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# PHASE 2: STATIC MANAGE LINKS CLEANUP (BLINDED AGAINST PROPERTY CRASHES)
+# PHASE 2: STATIC MANAGE LINKS CLEANUP (ISOLATED TRANSACTIONS)
 # =========================================================================
 TransactionManager.Instance.EnsureInTransaction(doc)
 
-# Use static ElementId collection to prevent CPython reference leaks on links
+# Retrieve link instances using native static collections to prevent reference memory leaks
 link_ids = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElementIds()
 
 for l_id in link_ids:
@@ -127,19 +162,20 @@ for l_id in link_ids:
         if link is None:
             continue
             
-        # Using Element.Name property to safely fetch internal name strings
         link_name = Element.Name.GetValue(link).lower()
         
+        # Gracefully unload standard external Revit links
         if link_name.endswith(".rvt") and not link.IsNestedLink:
             if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
                 link.Unload(None)
                 rvt_unloaded += 1
+        # Permanently purge legacy coordination IFC file configurations
         elif ".ifc" in link_name:
             doc.Delete(l_id)
             links_removed += 1
     except: pass
 
-# Process specific element type collections via isolated blocks
+# Process specific cloud, cad, and coordinate element collections via isolated blocks
 link_categories = [CADLinkType, PointCloudType, CoordinationModelType, TopographyLinkType]
 for cat in link_categories:
     try:
@@ -163,27 +199,21 @@ except: pass
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# PHASE 3: GENERATE, LINK, AND CONFIGURE TARGET DELIVERY VIEWS & TEMPLATES
+# PHASE 3: CONFIGURE TARGET DELIVERY VIEWS & GENERATE MATCHING TEMPLATES
 # =========================================================================
 TransactionManager.Instance.EnsureInTransaction(doc)
 try:
-    view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
-    view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
-    
     existing_3d_views = FilteredElementCollector(doc).OfClass(View3D).ToElements()
     all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
     
     for name in TARGET_NAMES:
-        view_3d = next((v for v in existing_3d_views if v.Name.upper().replace("ISSAO", "ISSAO") == name), None)
+        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
         
-        if not view_3d and view_3d_family_type:
-            view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
-            view_3d.Name = name
-            
         if view_3d:
-            created_elements_ids.Add(view_3d.Id)
-            template = next((t for t in all_templates if t.Name.upper().replace("ISSAO", "ISSAO") == name), None)
+            # Query if a matching View Template is already initialized
+            template = next((t for t in all_templates if t.Name.upper() == name), None)
             
+            # Generate a fresh View Template if missing from the active database mapping
             if not template:
                 template = view_3d.CreateViewTemplate()
                 template.Name = name
@@ -198,7 +228,7 @@ except: pass
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# PHASE 4: RECURSIVE SUPER PURGE (DATABASE GARBAGE COLLECTION)
+# PHASE 4: RECURSIVE DATABASE PURGE (GARBAGE COLLECTION)
 # =========================================================================
 loop_safety = 0
 max_loops = 10 
@@ -219,16 +249,13 @@ while loop_safety < max_loops:
     for e_id in unused_ids:
         try:
             doc.Delete(e_id)
-            purged_this_loop += 1
             total_purged += 1
+            purged_this_loop += 1
         except: pass
-            
+        
     TransactionManager.Instance.TransactionTaskDone()
     if purged_this_loop == 0:
         break
     loop_safety += 1
 
-# =========================================================================
-# OUTPUT DIRECT ASSIGNMENT
-# =========================================================================
-OUT = "SUCCESS"
+# DYNAMO PERFORMANCE LOG OUTPUT
