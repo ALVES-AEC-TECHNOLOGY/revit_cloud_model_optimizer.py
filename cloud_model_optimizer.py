@@ -205,7 +205,4 @@ while loop_safety < max_loops:
         break
     loop_safety += 1
 
-# =========================================================================
-# RETORNO SIMPLIFICADO DIRETAMENTE VIA STRING (ZERO RISCO DE SYNTAX ERROR)
-# =========================================================================
 OUT = "Sucesso! Vistas apagadas: " + str(views_deleted) + " | Purge total: " + str(total_purged)
