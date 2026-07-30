@@ -82,46 +82,45 @@ try:
             apply_strict_filters(doc, view_3d)
 except: pass
 
-# --- PASSO 2: VARREDURA E DELEÇÃO SELETIVA DE VISTAS 2D FORA DE FOLHAS ---
+# --- PASSO 2: FILTRO CIRÚRGICO POR IDENTITY DATA (SHEET NAME / NUMBER) ---
 try:
-    valid_view_types = [
-        ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, 
-        ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan
-    ]
-    
     all_views = FilteredElementCollector(doc).OfClass(View).ToElements()
     for view in all_views:
         try:
             v_id = view.Id
+            
+            # Se for uma das nossas duas vistas 3D ou templates protegidos, pula direto
             if v_id in created_elements_ids:
                 continue
                 
+            # Ignorar tabelas, folhas físicas e componentes do navegador
             if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
                 continue
 
+            # Se for um View Template antigo, deleta
             if view.IsTemplate:
                 doc.Delete(v_id)
                 templates_deleted += 1
                 continue
 
-            if view.ViewType in valid_view_types:
-                v_name_upper = view.Name.upper()
-                if any(target in v_name_upper for target in TARGET_NAMES):
-                    continue
+            # Varrer apenas vistas gráficas de projeto
+            if view.ViewType in [ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan]:
                 
-                # Checagem por lookup estável de parâmetro de texto
+                # Tenta buscar os parâmetros do Identity Data
                 p_num = view.LookupParameter("Sheet Number")
                 p_name = view.LookupParameter("Sheet Name")
                 
                 s_num = p_num.AsString() if p_num else None
                 s_name = p_name.AsString() if p_name else None
                 
-                is_on_sheet = True
-                if not s_num or s_num in ["", "---", "-"]:
-                    if not s_name or s_name in ["", "---", "-"]:
-                        is_on_sheet = False
-                        
-                if not is_on_sheet:
+                # Regra de Conformidade: Se tiver número E nome válidos, está em conformidade (NÃO DELETA)
+                has_conformity = False
+                if s_num and s_num != "" and s_num != "---" and s_num != "-":
+                    if s_name and s_name != "" and s_name != "---" and s_name != "-":
+                        has_conformity = True
+                
+                # Se NÃO tiver conformidade com os parâmetros preenchidos, passa o rodo
+                if not has_conformity:
                     if view.CanBeDeleted():
                         doc.Delete(v_id)
                         views_deleted += 1
@@ -205,4 +204,7 @@ while loop_safety < max_loops:
         break
     loop_safety += 1
 
+# =========================================================================
+# RETORNO DIRETO DE TEXTO (ZERO RISCO DE SYNTAX ERROR)
+# =========================================================================
 OUT = "Sucesso! Vistas apagadas: " + str(views_deleted) + " | Purge total: " + str(total_purged)
