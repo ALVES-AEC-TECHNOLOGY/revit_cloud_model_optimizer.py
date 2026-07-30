@@ -105,32 +105,41 @@ try:
 except: pass
 
 # ---------------------------------------------------------------------
-# PASSO 3: VARREDURA E DELEÇÃO AGRESSIVA DE VISTAS 2D FORA DE FOLHAS
+# PASSO 3: VARREDURA E DELEÇÃO SELETIVA DE TODAS AS VISTAS FORA DE FOLHAS
 # ---------------------------------------------------------------------
 try:
+    # Tipos de vistas gráficos legítimos que queremos varrer (2D e 3D)
+    valid_view_types = [
+        ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, 
+        ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan
+    ]
+    
     all_views = FilteredElementCollector(doc).OfClass(View).ToElements()
     for view in all_views:
-        v_id = view.Id
-        
-        if v_id in created_elements_ids:
-            continue
+        try:
+            v_id = view.Id
             
-        if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
-            continue
-
-        if view.IsTemplate:
-            try:
-                doc.Delete(v_id)
-                templates_deleted += 1
-            except: pass
-            continue
-
-        if v_id not in placed_view_ids:
-            if view.CanBeDeleted():
-                try:
+            # Se for um View Template antigo/inútil, deleta (protegendo os novos criados no Passo 2)
+            if view.IsTemplate:
+                if v_id not in created_elements_ids:
                     doc.Delete(v_id)
-                    views_deleted += 1
-                except: pass
+                    templates_deleted += 1
+                continue
+
+            # Filtra apenas para analisar vistas gráficas reais de projeto
+            if view.ViewType in valid_view_types:
+                v_name_upper = view.Name.upper()
+                
+                # Se for uma das duas vistas 3D protegidas, ignora e não deleta de jeito nenhum
+                if v_id in created_elements_ids or any(target in v_name_upper for target in TARGET_NAMES):
+                    continue
+                
+                # Se a vista NÃO está em nenhuma folha, ela deve ser deletada
+                if v_id not in placed_view_ids:
+                    if view.CanBeDeleted():
+                        doc.Delete(v_id)
+                        views_deleted += 1
+        except: pass
 except: pass
 
 # ---------------------------------------------------------------------
@@ -148,7 +157,6 @@ except: pass
 # ---------------------------------------------------------------------
 # PASSO 5: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
 # ---------------------------------------------------------------------
-# 1. Unload de arquivos .rvt e eliminação de IFCs (.ifc.rvt)
 try:
     rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
     for link in rvt_links:
@@ -158,13 +166,14 @@ try:
                 if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
                     link.Unload(None)
                     rvt_unloaded += 1
+                elif link.GetLinkedFileStatus() == LinkedFileStatus.Unloaded:
+                    rvt_unloaded += 1
             elif ".ifc" in l_name:
                 doc.Delete(link.Id)
                 links_removed += 1
         except: pass
 except: pass
 
-# 2. Eliminação total de instâncias importadas/vinculadas (CAD/DWG)
 try:
     import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
     for inst_id in import_instances:
@@ -174,7 +183,6 @@ try:
         except: pass
 except: pass
 
-# 3. Remoção de Coordination Models (NWD/NWC) e Topografias por tipos de classe
 link_classes = [CADLinkType, PointCloudType]
 try: link_classes.append(CoordinationModelType)
 except: pass
@@ -191,11 +199,10 @@ for cls in link_classes:
             except: pass
     except: pass
 
-# Finaliza a transição do Bloco A para liberar os elementos para o Purge
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# BLOCK B: RECURSIVE DEEP PURGE OF UNUSED ELEMENTS (Cascading Garbage Collection)
+# BLOCK B: RECURSIVE DEEP PURGE OF UNUSED ELEMENTS
 # =========================================================================
 loop_safety = 0
 max_loops = 10 
