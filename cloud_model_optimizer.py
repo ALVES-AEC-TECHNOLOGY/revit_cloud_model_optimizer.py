@@ -206,23 +206,6 @@ while loop_safety < max_loops:
     loop_safety += 1
 
 # =========================================================================
-# OUTPUT LOG REPORT (SINTAXE CORRIGIDA COM F-STRINGS)
+# RETORNO SIMPLIFICADO DIRETAMENTE VIA STRING (ZERO RISCO DE SYNTAX ERROR)
 # =========================================================================
-report_log = [
-    "🔥 ALVES AEC TECH - DEEP PURGE OPTIMIZER SUCCESSFUL 🔥",
-    "------------------------------------------------------------",
-    f"• Vistas 2D limpas (sem prancha) e 3Ds obsoletas: {views_deleted}",
-    f"• View Templates obsoletos destruídos: {templates_deleted}",
-    f"• Model & Detail Groups apagados do Browser: {groups_deleted}",
-    f"• Vínculos .RVT descarregados com segurança: {rvt_unloaded}",
-    f"• Vínculos e importações deletados (DWG/CAD/IFC): {links_removed}",
-    f"• Elementos orfaos removidos via Deep Purge: {total_purged}",
-    f"• Ciclos de otimizacao executados: {loop_safety}",
-    "------------------------------------------------------------",
-    "• CONFIGURACAO DAS VISTAS 3D DE ENTREGA:",
-    "  [+] 3D EMISSÃO e 3D NAVIS (e seus templates) ativos/ajustados.",
-    "  [✔️] Crop Desativado | Annotations Ocultas | Worksets '(HIDE)' Ocultos.",
-    "------------------------------------------------------------"
-]
-
-OUT = "\n".join(report_log)
+OUT = "Sucesso! Vistas apagadas: " + str(views_deleted) + " | Purge total: " + str(total_purged)
