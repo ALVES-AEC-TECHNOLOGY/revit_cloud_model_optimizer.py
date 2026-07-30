@@ -51,35 +51,34 @@ def apply_strict_filters(document, view_or_template):
             
             for wk in worksets_collector:
                 if "(HIDE)" in wk.Name.upper():
-                    # Aplica a ocultação do Workset diretamente na configuração da Vista/Template
                     view_or_template.SetWorksetVisibility(wk.Id, WorksetVisibility.Hidden)
-    except Exception as e:
+    except:
         pass
 
 # =========================================================================
-# EXECUÇÃO DO PROCESSO EM TRANSAÇÃO ÚNICA
+# EXECUÇÃO DO PROCESSO EM TRANSAÇÃO ÚNICA (BLOCOS ISOLADOS)
 # =========================================================================
 TransactionManager.Instance.EnsureInTransaction(doc)
 
+# ---------------------------------------------------------------------
+# PASSO 1: MAPEAMENTO RIGOROSO DE FOLHAS (SHEETS)
+# ---------------------------------------------------------------------
+placed_view_ids = HashSet[ElementId]()
 try:
-    # ---------------------------------------------------------------------
-    # PASSO 1: MAPEAMENTO RIGOROSO DE FOLHAS (SHEETS)
-    # ---------------------------------------------------------------------
-    placed_view_ids = HashSet[ElementId]()
     sheets_collector = FilteredElementCollector(doc).OfClass(ViewSheet).ToElements()
     for sheet in sheets_collector:
         for v_id in sheet.GetAllPlacedViews():
             placed_view_ids.Add(v_id)
+except: pass
 
-    # ---------------------------------------------------------------------
-    # PASSO 2: CRIAÇÃO/GARANTIA DAS VISTAS 3D E SEUS RESPECTIVOS TEMPLATES
-    # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# PASSO 2: CRIAÇÃO/GARANTIA DAS VISTAS 3D E SEUS RESPECTIVOS TEMPLATES
+# ---------------------------------------------------------------------
+created_elements_ids = HashSet[ElementId]()
+try:
     view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
     view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
     
-    created_elements_ids = HashSet[ElementId]()
-    final_3d_views = {}
-
     for name in TARGET_NAMES:
         view_3d = next((v for v in FilteredElementCollector(doc).OfClass(View3D).ToElements() if v.Name.upper() == name), None)
         
@@ -87,29 +86,29 @@ try:
             view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
             view_3d.Name = name
             
-        final_3d_views[name] = view_3d
-        created_elements_ids.Add(view_3d.Id)
-        
-        all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
-        template = next((t for t in all_templates if t.Name.upper() == name), None)
-        
-        if not template and view_3d:
-            template = view_3d.CreateViewTemplate()
-            template.Name = name
+        if view_3d:
+            created_elements_ids.Add(view_3d.Id)
             
-        created_elements_ids.Add(template.Id)
-        
-        if view_3d and template:
-            view_3d.ViewTemplateId = template.Id
+            all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
+            template = next((t for t in all_templates if t.Name.upper() == name), None)
             
-        apply_strict_filters(doc, view_3d)
-        apply_strict_filters(doc, template)
+            if not template:
+                template = view_3d.CreateViewTemplate()
+                template.Name = name
+                
+            if template:
+                created_elements_ids.Add(template.Id)
+                view_3d.ViewTemplateId = template.Id
+                apply_strict_filters(doc, template)
+                
+            apply_strict_filters(doc, view_3d)
+except: pass
 
-    # ---------------------------------------------------------------------
-    # PASSO 3: VARREDURA E DELEÇÃO AGRESSIVA DE VISTAS 2D FORA DE FOLHAS
-    # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# PASSO 3: VARREDURA E DELEÇÃO AGRESSIVA DE VISTAS 2D FORA DE FOLHAS
+# ---------------------------------------------------------------------
+try:
     all_views = FilteredElementCollector(doc).OfClass(View).ToElements()
-    
     for view in all_views:
         v_id = view.Id
         
@@ -132,21 +131,25 @@ try:
                     doc.Delete(v_id)
                     views_deleted += 1
                 except: pass
+except: pass
 
-    # ---------------------------------------------------------------------
-    # PASSO 4: DELEÇÃO DE GRUPOS DO BROWSER
-    # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# PASSO 4: DELEÇÃO DE GRUPOS DO BROWSER
+# ---------------------------------------------------------------------
+try:
     group_ids = FilteredElementCollector(doc).OfClass(GroupType).ToElementIds()
     for g_id in group_ids:
         try:
             doc.Delete(g_id)
             groups_deleted += 1
         except: pass
+except: pass
 
-    # ---------------------------------------------------------------------
-    # PASSO 5: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
-    # ---------------------------------------------------------------------
-    # 1. Varredura profunda em todos os RevitLinkType (inclui arquivos .ifc.rvt)
+# ---------------------------------------------------------------------
+# PASSO 5: UNLOAD E LIMPEZA TOTAL DE EXTERNAL LINKS (RVT, CAD, IFC, NAVIS)
+# ---------------------------------------------------------------------
+# 1. Unload de arquivos .rvt e eliminação de IFCs (.ifc.rvt)
+try:
     rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
     for link in rvt_links:
         try:
@@ -155,41 +158,40 @@ try:
                 if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
                     link.Unload(None)
                     rvt_unloaded += 1
-                elif link.GetLinkedFileStatus() == LinkedFileStatus.Unloaded:
-                    rvt_unloaded += 1
             elif ".ifc" in l_name:
                 doc.Delete(link.Id)
                 links_removed += 1
         except: pass
+except: pass
 
-    # 2. Eliminação total de instâncias importadas/vinculadas (CAD/DWG)
+# 2. Eliminação total de instâncias importadas/vinculadas (CAD/DWG)
+try:
     import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
     for inst_id in import_instances:
         try:
             doc.Delete(inst_id)
             links_removed += 1
         except: pass
+except: pass
 
-    # 3. Remoção de Coordination Models (NWD/NWC) e Topografias por tipos de classe
-    link_classes = [CADLinkType, PointCloudType]
-    try: link_classes.append(CoordinationModelType)
+# 3. Remoção de Coordination Models (NWD/NWC) e Topografias por tipos de classe
+link_classes = [CADLinkType, PointCloudType]
+try: link_classes.append(CoordinationModelType)
+except: pass
+try: link_classes.append(TopographyLinkType)
+except: pass
+
+for cls in link_classes:
+    try:
+        lnk_ids = FilteredElementCollector(doc).OfClass(cls).ToElementIds()
+        for l_id in lnk_ids:
+            try:
+                doc.Delete(l_id)
+                links_removed += 1
+            except: pass
     except: pass
-    try: link_classes.append(TopographyLinkType)
-    except: pass
 
-    for cls in link_classes:
-        try:
-            lnk_ids = FilteredElementCollector(doc).OfClass(cls).ToElementIds()
-            for l_id in lnk_ids:
-                try:
-                    doc.Delete(l_id)
-                    links_removed += 1
-                except: pass
-        except: pass
-
-except Exception as main_err:
-    pass
-
+# Finaliza a transição do Bloco A para liberar os elementos para o Purge
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
