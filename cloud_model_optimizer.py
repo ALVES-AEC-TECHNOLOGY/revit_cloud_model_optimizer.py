@@ -20,7 +20,7 @@ from System.Collections.Generic import HashSet
 # INITIALIZATION
 doc = DocumentManager.Instance.CurrentDBDocument
 
-# Reporting counters for the final output
+# Reporting counters for the final performance log output
 groups_deleted = 0
 views_deleted = 0
 templates_deleted = 0
@@ -50,7 +50,7 @@ def apply_strict_filters(document, view_or_template):
     except: pass
 
 # =========================================================================
-# PHASE 1: STATIC VIEW & GROUP CLEANUP
+# PHASE 1: STATIC VIEW & GROUP CLEANUP (YOUR PROVEN METHOD)
 # =========================================================================
 view_ids = FilteredElementCollector(doc).OfClass(View).ToElementIds()
 
@@ -66,7 +66,7 @@ for v_id in view_ids:
             continue
             
         if view.IsTemplate:
-            v_name_upper = view.Name.upper().replace("CAO", "CAO").replace("CCAO", "CAO")
+            v_name_upper = view.Name.upper().replace("CAO", "CAO")
             if not any(target in v_name_upper for target in TARGET_NAMES):
                 doc.Delete(v_id)
                 templates_deleted += 1
@@ -78,7 +78,7 @@ for v_id in view_ids:
         ]
         
         if view.ViewType in valid_view_types:
-            v_name_upper = view.Name.upper().replace("ISSAO", "ISSAO")
+            v_name_upper = view.Name.upper()
             
             if "3D EMIS" in v_name_upper or "3D NAVIS" in v_name_upper:
                 created_elements_ids.Add(v_id)
@@ -114,58 +114,51 @@ except: pass
 TransactionManager.Instance.TransactionTaskDone()
 
 # =========================================================================
-# PHASE 2: STATIC MANAGE LINKS CLEANUP
+# PHASE 2: STATIC MANAGE LINKS CLEANUP (BLINDED AGAINST PROPERTY CRASHES)
 # =========================================================================
 TransactionManager.Instance.EnsureInTransaction(doc)
 
-rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
-for link in rvt_links:
-    if not link.IsNestedLink:
-        try:
-            l_name = link.Name.lower()
-            if l_name.endswith(".rvt"):
-                if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
-                    link.Unload(None)
-                    rvt_unloaded += 1
-            elif ".ifc" in l_name:
-                doc.Delete(link.Id)
+# Use static ElementId collection to prevent CPython reference leaks on links
+link_ids = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElementIds()
+
+for l_id in link_ids:
+    try:
+        link = doc.GetElement(l_id)
+        if link is None:
+            continue
+            
+        # Using Element.Name property to safely fetch internal name strings
+        link_name = Element.Name.GetValue(link).lower()
+        
+        if link_name.endswith(".rvt") and not link.IsNestedLink:
+            if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
+                link.Unload(None)
+                rvt_unloaded += 1
+        elif ".ifc" in link_name:
+            doc.Delete(l_id)
+            links_removed += 1
+    except: pass
+
+# Process specific element type collections via isolated blocks
+link_categories = [CADLinkType, PointCloudType, CoordinationModelType, TopographyLinkType]
+for cat in link_categories:
+    try:
+        cat_ids = FilteredElementCollector(doc).OfClass(cat).ToElementIds()
+        for c_id in cat_ids:
+            try:
+                doc.Delete(c_id)
                 links_removed += 1
+            except: pass
+    except: pass
+
+try:
+    import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
+    for inst_id in import_instances:
+        try:
+            doc.Delete(inst_id)
+            links_removed += 1
         except: pass
-
-cad_types = FilteredElementCollector(doc).OfClass(CADLinkType).ToElementIds()
-for c_id in cad_types:
-    try:
-        doc.Delete(c_id)
-        links_removed += 1
-    except: pass
-
-point_clouds = FilteredElementCollector(doc).OfClass(PointCloudType).ToElementIds()
-for p_id in point_clouds:
-    try:
-        doc.Delete(p_id)
-        links_removed += 1
-    except: pass
-
-coord_models = FilteredElementCollector(doc).OfClass(CoordinationModelType).ToElementIds()
-for co_id in coord_models:
-    try:
-        doc.Delete(co_id)
-        links_removed += 1
-    except: pass
-
-topo_links = FilteredElementCollector(doc).OfClass(TopographyLinkType).ToElementIds()
-for t_id in topo_links:
-    try:
-        doc.Delete(t_id)
-        links_removed += 1
-    except: pass
-
-import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
-for inst_id in import_instances:
-    try:
-        doc.Delete(inst_id)
-        links_removed += 1
-    except: pass
+except: pass
 
 TransactionManager.Instance.TransactionTaskDone()
 
