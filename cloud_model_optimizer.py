@@ -27,6 +27,23 @@ rvt_unloaded = 0
 links_removed = 0
 total_purged = 0
 
+# Nomes das duas únicas vistas 3D que devem ficar vivas
+TARGET_3D_NAMES = ["3D EMISSÃO", "3D NAVIS", "3D EMISSAO"]
+protected_template_ids = set()
+
+# =========================================================================
+# MAQUEAMENTO PRÉVIO: IDENTIFICAR E PROTEGER OS TEMPLATES DAS VISTAS 3D
+# =========================================================================
+all_views_collector = FilteredElementCollector(doc).OfClass(View).ToElements()
+
+# Primeiro passo: Localizar as vistas 3D que serão salvas e mapear seus templates
+for view in all_views_collector:
+    if not view.IsTemplate and view.ViewType == ViewType.ThreeD:
+        v_name = view.Name.upper()
+        if any(target in v_name for target in TARGET_3D_NAMES):
+            if view.ViewTemplateId != ElementId.InvalidElementId:
+                protected_template_ids.add(view.ViewTemplateId)
+
 # =========================================================================
 # BLOCK A: GROUPS, VIEWS, TEMPLATES, AND LINK MANAGEMENT
 # Executed within a single continuous transaction block to optimize speed
@@ -41,30 +58,65 @@ for g_id in group_ids:
         groups_deleted += 1
     except: pass
 
-# --- STEP 2: PURGE 3D VIEWS & VIEW TEMPLATES (Preserving 2D Sheets and Plans) ---
-view_ids = FilteredElementCollector(doc).OfClass(View).ToElementIds()
-for v_id in view_ids:
+# --- STEP 2: PURGE REDUNDANT 2D/3D VIEWS & UNUSED TEMPLATES ---
+# Coleta todas as folhas (Sheets) para identificar quais vistas estão sendo usadas em pranchas
+sheets = FilteredElementCollector(doc).OfClass(ViewSheet).ToElements()
+views_on_sheets = set()
+for sheet in sheets:
+    for view_id in sheet.GetAllPlacedViews():
+        views_on_sheets.add(view_id)
+
+for view in all_views_collector:
     try:
-        view = doc.GetElement(v_id)
-        if view is None or view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser]:
+        v_id = view.Id
+        
+        # Ignorar tabelas, gerenciadores internos e o próprio Project Browser
+        if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
             continue
             
+        # Se for um View Template
         if view.IsTemplate:
-            doc.Delete(v_id)
-            templates_deleted += 1
+            # SÓ deleta se NÃO for o template de uma das nossas vistas 3D protegidas
+            if v_id not in protected_template_ids:
+                doc.Delete(v_id)
+                templates_deleted += 1
             continue 
 
+        # Se for uma Vista 3D
         if view.ViewType == ViewType.ThreeD:
             v_name = view.Name.upper()
-            # Safety gate: Protect critical coordination and export views
-            if "3D EMISSÃO" in v_name or "3D NAVIS" in v_name or "3D EMISSAO" in v_name:
+            # Safety gate: Protege as vistas de coordenação da infraestrutura
+            if any(target in v_name for target in TARGET_3D_NAMES):
+                
+                # --- CONFIGURAÇÃO AVANÇADA DOS TEMPLATES/VISTAS SALVAS ---
+                # Se tiver template, altera o template, senão altera direto na vista
+                t_id = view.ViewTemplateId
+                target_config = doc.GetElement(t_id) if t_id != ElementId.InvalidElementId else view
+                
+                try:
+                    # Desabilitar Crop Box (Evita interferência na nuvem do Navis)
+                    target_config.CropBoxActive = False
+                    target_config.CropBoxVisible = False
+                    # Desabilitar Categoria de Anotações (Annotations)
+                    target_config.AreAnnotationCategoriesHidden = True
+                except: pass
                 continue 
-            doc.Delete(v_id)
-            views_deleted += 1
+                
+            # Se não for uma das salvas, apaga
+            if view.CanBeDeleted():
+                doc.Delete(v_id)
+                views_deleted += 1
+                
+        # Se for uma Vista 2D (Plantas, Cortes, Elevações, Detalhes)
+        elif view.ViewType in [ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, ViewType.Section, ViewType.Detail]:
+            # Se a vista NÃO estiver em nenhuma folha, passa o rodo
+            if v_id not in views_on_sheets and view.CanBeDeleted():
+                doc.Delete(v_id)
+                views_deleted += 1
     except: pass
 
-# --- STEP 3: LINK DETACHMENT (Unload RVTs and Hard Delete Formats) ---
-# Unload Revit Links to safely release server RAM memory
+# --- STEP 3: LINK MANAGEMENT (Unload RVTs and Hard Delete Everything Else) ---
+# 1. Unload em links Revit (.rvt) existentes
 rvt_links = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements()
 for link in rvt_links:
     if not link.IsNestedLink:
@@ -74,10 +126,17 @@ for link in rvt_links:
                 rvt_unloaded += 1
         except: pass
 
-# Dynamic safety array of alternative link classes for complete structural removal
-link_classes = [CADLinkType, PointCloudType]
+# 2. Remover categoricamente todos os outros formatos (DWG, CAD, IFC, Imagens, Topo)
+# Remove as instâncias inseridas (ImportInstance engloba CADs vinculados/importados e IFCs)
+import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
+for inst_id in import_instances:
+    try:
+        doc.Delete(inst_id)
+        links_removed += 1
+    except: pass
 
-# Fallback injection to maintain compatibility across older Revit API installations
+# Remove as definições de tipo de link remanescentes e outros formatos nativos
+link_classes = [CADLinkType, PointCloudType]
 try: link_classes.append(CoordinationModelType)
 except: pass
 try: link_classes.append(TopographyLinkType)
@@ -93,7 +152,7 @@ for cls in link_classes:
             except: pass
     except: pass
 
-# Commit Block A transactions to update the BIM model state before compiling the Purge list
+# Commit Block A transactions
 TransactionManager.Instance.TransactionTaskDone()
 
 
@@ -107,7 +166,6 @@ max_loops = 10
 while loop_safety < max_loops:
     TransactionManager.Instance.EnsureInTransaction(doc)
     
-    # Compile the orphan elements list generated by Block A modifications using native .NET HashSet
     try:
         unused_ids = doc.GetUnusedElements(System.Collections.Generic.HashSet[ElementId]())
     except:
@@ -128,7 +186,6 @@ while loop_safety < max_loops:
             
     TransactionManager.Instance.TransactionTaskDone()
     
-    # If a cycle yields zero element cleanups, the database is optimized; break loop
     if purged_this_loop == 0:
         break
         
@@ -138,17 +195,17 @@ while loop_safety < max_loops:
 # FINAL BIM PERFORMANCE LOG REPORT
 # =========================================================================
 report_log = [
-    "🔥 CLOUD DELIVERY MODEL OPTIMIZER EXECUTED SUCCESSFULLY! 🔥",
+    "🔥 ALVES AEC TECH - CLOUD DELIVERY OPTIMIZER EXECUTED! 🔥",
     "-"*50,
     "• Model & Detail Groups purged from Browser: {}".format(groups_deleted),
-    "• View Templates destroyed: {}".format(templates_deleted),
-    "• Redundant 3D Views deleted (Saved EMISSÃO & NAVIS): {}".format(views_deleted),
+    "• View Templates destroyed (Protected EMISSÃO/NAVIS): {}".format(templates_deleted),
+    "• Redundant Views deleted (2D Unplaced & Unused 3D): {}".format(views_deleted),
     "• Revit Cloud Links safely unloaded: {}".format(rvt_unloaded),
-    "• Hard links completely removed (DWG, Clouds, NWD, Topo): {}".format(links_removed),
+    "• Hard links completely removed (DWG, CAD, IFC, PointCloud): {}".format(links_removed),
     "• Secondary cascading elements purged (Deep Purge): {}".format(total_purged),
     "• Optimization recursive cycles required: {}".format(loop_safety),
     "-"*50,
-    "Model performance is 100% optimized and ready for cloud upload/emission!"
+    "Model performance optimized. Checked View Templates: Crop Disabled, Annotations Hidden."
 ]
 
 OUT = "\n".join(report_log)
