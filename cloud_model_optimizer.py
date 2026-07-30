@@ -36,7 +36,7 @@ rvt_unloaded = 0
 links_removed = 0
 total_purged = 0
 
-TARGET_NAMES = ["3D EMISSAO", "3D NAVIS"]
+TARGET_NAMES = ["3D EMISSION", "3D NAVIS"]
 created_elements_ids = HashSet[ElementId]()
 
 # =========================================================================
