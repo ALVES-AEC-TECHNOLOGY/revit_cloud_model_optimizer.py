@@ -1,36 +1,52 @@
-# Cloud-Delivery Model Optimizer & Deep Purge Engine (Revit API)
+# Revit Model Purging & Cleanup Automation Script
 
-Enterprise **Python** utility for **Autodesk Revit** to sanitize and compress **BIM** models before **BIM 360** upload.
+A production-ready Python automation script designed for **Autodesk Revit 2024+** running the modern **CPython3 engine** inside Dynamo. This script automates model maintenance, data auditing, and file optimization according to strict BIM quality standards.
 
-## 🧠 Architectural Solution
+## 🚀 Key Features
 
-This script utilizes two high-speed transaction gates to sanitize data:
+*   **Group Cleanup:** Automatically deletes all active model/detail group instances and removes obsolete Group Types from the Project Browser.
+*   **Unplaced View Deletion:** Mapped database filters scan for all 2D views (Plans, Sections, Elevations) that are not placed on any active sheet (`ViewSheet`) and deletes them. 
+    *   *Safe-guard:* Automatically protects Parent Views with active dependent views and retains Legend views.
+    *   *Note:* 3D Views are skipped by design for manual auditing.
+*   **Link & Import Management:** Wipes imported/linked CAD graphics (`ImportInstance`) from all views and drops unused vector layouts (`CADLinkType`) from the Manage Links catalog. Unloads external Revit Links (RVT) while preserving file paths.
+*   **Deep Super Purge Loop:** Runs a native recursive 10-cycle loop invoking `GetUnusedElements()` via explicit .NET collections to eliminate complex cascading data blocks.
 
-### Block A: Structural Hard-Purge & Link Management
-* **Group Dissolution:** Deletes unused Model/Detail Groups from browser database.
-* **Smart 3D Filtering:** Purges redundant views while protecting target emission ones.
-* **RAM Release:** Unloads primary Revit Links and hard-deletes heavy CAD files.
+## 🛠️ Tech Stack & Requirements
 
-### Block B: Recursive Deep Purge
-* **Cascading Cleanup:** Executes a recursive `.GetUnusedElements()` .NET loop.
-* **Maximum Compression:** Wipes nested orphan dependencies continuously up to 10 cycles.
+*   **Host Environment:** Autodesk Revit 2024 / 2025 / 2026
+*   **Visual Programming Context:** Dynamo Sandbox / Dynamo for Revit
+*   **Execution Engine:** CPython 3
+*   **API Target:** Revit API (`Autodesk.Revit.DB`)
 
-## 🛠 Technical Specifications
-* **Environment:** Autodesk Revit 2021+
-* **Engine:** IronPython / CPython via Dynamo Script Node
-* **Language:** Python / Revit API / .NET Framework
+## 📦 Architecture & Design Patterns
 
-## 📈 Financial & Operational ROI (Business Impact)
+The script incorporates advanced Revit API handling routines required to prevent runtime exceptions under the CPython3 framework:
+1.  **Static Evaluation:** Avoids runtime database mutation errors by evaluating `FilteredElementCollector` outputs into static native Python lists before loop execution.
+2.  **Explicit Typed Collections:** Instantiates memory-compliant C# `HashSet[ElementId]()` arrays via `.NET` system references to fulfill the strict signature requirement of `doc.GetUnusedElements()`.
+3.  **Advanced Transaction Handling:** Segregates cleanup phases from the purge loop, ensuring sequential transaction management via `TransactionManager` to maintain model database stability.
 
-### Cloud Storage Cost Compression
-* **File Size Reduction:** Drops model size (MB) to cut server storage billing tiers.
-* **Server Optimization:** Speeds up cloud synchronization and download times for teams.
+## 💻 Installation & Usage
 
-### Elimination of Manual Friction
-* **Instant Group Dissolution:** Deletes nested browser groups instantly without manual clicks.
-* **Orphan View Audit:** Wipes unplaced drawings without needing schedule tracking sheets.
-* **Production Speed:** Turns a 40-minute manual coordination checklist into a 4-second execution.
+1.  Open your active Revit Model on a Windows x86 machine.
+2.  Launch **Dynamo** (`Manage` tab > `Visual Programming` panel > `Dynamo`).
+3.  Add a new **Python Script** node to the canvas.
+4.  Right-click the node, change the engine setting to **CPython3**.
+5.  Double-click the node, delete any default boilerplate text, and paste the code from `revit_cleanup.py`.
+6.  Set the Dynamo execution mode to **Manual** (bottom-left corner) and click **Run**.
 
-### Infrastructure Austerity & Compliance
-* **Zero SaaS Tolls:** Runs 100% locally with $0 in recurring cloud fees.
-* **Data Sovereignty:** Zero data leaks to external servers, ensuring strict GDPR compliance.
+## 📝 Script Configuration
+
+If you want to manually update the protected categories or safe view filters, navigate to the `delete_unused_views` function parameters:
+
+```python
+# Modifying view protections inside the loop
+if v_type in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet, ViewType.Legend]:
+    continue
+```
+
+## ⚖️ License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+---
+*Disclaimer: Always run this tool in a detached local copy or take a backup of your central model before processing deep purging operations.*
