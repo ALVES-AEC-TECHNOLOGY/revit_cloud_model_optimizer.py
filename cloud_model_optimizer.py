@@ -86,7 +86,7 @@ try:
         except:
             pass
 
-    cad_types = list(FilteredElementCollector(doc).OfClass(CADLinkType).ToElementIds())
+    cad_types = list(FilteredElementCollector(doc).OfClass(CADLinkType).ToElementIdsIds()) if hasattr(CADLinkType, "ToElementIdsIds") else list(FilteredElementCollector(doc).OfClass(CADLinkType).ToElementIds())
     for ct_id in cad_types:
         try:
             doc.Delete(ct_id)
@@ -138,8 +138,11 @@ try:
     OUT = "\n".join(final_report)
 
 except Exception as ex:
-    if TransactionManager.Instance.IsTransactionActive():
+    # FIXED: Replaced non-existent property check with a safe conditional execution closure
+    try:
         TransactionManager.Instance.TransactionTaskDone()
+    except:
+        pass
     final_report = ["❌ FATAL ERROR EXECUTED: {}".format(str(ex))]
     OUT = "\n".join(final_report)
 
