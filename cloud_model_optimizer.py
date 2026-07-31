@@ -1,39 +1,257 @@
 # -*- coding: utf-8 -*-
-"""
-Script de Limpeza de Modelo, Auditoria e Emissão BIM
-Autor: ALVES AEC TECHNOLOGY
-Descrição: Script corrigido de ponta a ponta para execução no IronPython do Dynamo.
-"""
-
 import sys
 import clr
 
-# Importar Elementos da API do Revit
+# Import Revit API Elements
 clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import *
 
-# Importar Serviços de Transação e Documento do Dynamo (Nome corrigido: Persistence)
+# Import Dynamo Document and Transaction Services
 clr.AddReference('RevitServices')
 import RevitServices
 from RevitServices.Persistence import DocumentManager
 from RevitServices.Transactions import TransactionManager
 
-# Importar Coleções do .NET System
+# Import System for .NET Collections
 clr.AddReference('System')
 import System
 from System.Collections.Generic import HashSet
 
-# INICIALIZAÇÃO DE VARIÁVEIS DO DOCUMENTO
+# INITIALIZATION
 doc = DocumentManager.Instance.CurrentDBDocument
-createdElementsIds = HashSet[ElementId]()
-targetNames = ["3D EMISSAO", "3D NAVIS"]
-viewCache = {}
 
-# Inicialização correta de todos os contadores para evitar NameError
+# Reporting counters
+groups_deleted = 0
 views_deleted = 0
-groupsDeleted = 0
-linksRvtRemoved = 0
-linksIfcRemoved = 0
+templates_deleted = 0
+rvt_unloaded = 0
+links_removed = 0
+total_purged = 0
+
+TARGET_NAMES = ["3D EMISSAO", "3D NAVIS"]
+created_elements_ids = HashSet[ElementId]()
+
+# =========================================================================
+# HELPER FUNCTION: CONFIGURATION OF CROP BOX, ANNOTATIONS, AND WORKSETS
+# =========================================================================
+def apply_strict_filters(document, view_or_template):
+    if not view_or_template:
+        return
+    try:
+        # Configuração de CropBox
+        view_or_template.CropBoxActive = False
+        view_or_template.CropBoxVisible = False
+        
+        # Desabilitar Annotations com segurança (funciona em Views e Templates)
+        if view_or_template.IsTemplate:
+            # Garante que a categoria de anotação (V/G Overrides Annotation) seja controlada pelo template
+            # Parâmetro interno do Revit correspondente à visibilidade de anotações
+            v_g_annotation_param_id = ElementId(BuiltInParameter.VIEW_TEMPLATE_SETTINGS) 
+            # Em muitas versões do Revit, usa-se a negação de categorias ocultas:
+            view_or_template.AreAnnotationCategoriesHidden = True
+        else:
+            view_or_template.AreAnnotationCategoriesHidden = True
+        
+        # Ocultar Worksets com "(HIDE)" no nome
+        if document.IsWorkshared:
+            worksets_collector = FilteredWorksetCollector(document).OfKind(WorksetKind.UserWorkset)
+            for wk in worksets_collector:
+                if "(HIDE)" in wk.Name.upper():
+                    view_or_template.SetWorksetVisibility(wk.Id, WorksetVisibility.Hidden)
+    except: 
+        pass
+
+# =========================================================================
+# OPERAÇÃO ANTECIPADA: CRIAR AS VISTAS ALVO PARA GARANTIR VISTA ATIVA
+# =========================================================================
+# (Corrigindo o problema do Revit travar ao deletar a vista ativa do usuário)
+TransactionManager.Instance.EnsureInTransaction(doc)
+try:
+    view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
+    view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
+    
+    existing_3d_views = FilteredElementCollector(doc).OfClass(View3D).ToElements()
+    
+    for name in TARGET_NAMES:
+        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
+        
+        # Se não existir, cria a vista 3D obrigatória antes da limpeza
+        if not view_3d and view_3d_family_type:
+            view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
+            view_3d.Name = name
+        
+        if view_3d:
+            created_elements_ids.Add(view_3d.Id)
+except: 
+    pass
+TransactionManager.Instance.TransactionTaskDone()
+
+
+# =========================================================================
+# PHASE 1: STATIC VIEW & GROUP CLEANUP (CORRIGIDO)
+# =========================================================================
+view_ids = FilteredElementCollector(doc).OfClass(View).ToElementIds()
+
+TransactionManager.Instance.EnsureInTransaction(doc)
+
+for v_id in view_ids:
+    try:
+        view = doc.GetElement(v_id)
+        if view is None:
+            continue
+            
+        # Ignorar vistas internas do sistema
+        if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
+            continue
+            
+        # CORREÇÃO: Preservar TODOS os View Templates existentes do projeto
+        if view.IsTemplate:
+            continue 
+
+        valid_view_types = [
+            ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, 
+            ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan
+        ]
+        
+        if view.ViewType in valid_view_types:
+            v_name_upper = view.Name.upper()
+            
+            # Proteger as vistas recém-criadas/alvo
+            if v_name_upper in TARGET_NAMES:
+                continue 
+                
+            # CORREÇÃO: Discriminar vistas em folhas usando SheetId (Propriedade Nativa)
+            is_on_sheet = view.SheetId != ElementId.InvalidElementId
+            
+            # Se for uma vista 3D qualquer (que não as alvo) OU não estiver em folha, deleta
+            if view.ViewType == ViewType.ThreeD or not is_on_sheet:
+                if view.CanBeDeleted() and v_id not in created_elements_ids:
+                    doc.Delete(v_id)
+                    views_deleted += 1
+                    
+    except: 
+        pass
+
+# Deletar os GroupTypes do modelo
+try:
+    group_ids = FilteredElementCollector(doc).OfClass(GroupType).ToElementIds()
+    for g_id in group_ids:
+        try:
+            doc.Delete(g_id)
+            groups_deleted += 1
+        except: pass
+except: pass
+
+TransactionManager.Instance.TransactionTaskDone()
+
+# =========================================================================
+# PHASE 2: STATIC MANAGE LINKS CLEANUP
+# =========================================================================
+TransactionManager.Instance.EnsureInTransaction(doc)
+
+link_ids = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElementIds()
+
+for l_id in link_ids:
+    try:
+        link = doc.GetElement(l_id)
+        if link is None:
+            continue
+            
+        link_name = Element.Name.GetValue(link).lower()
+        
+        if link_name.endswith(".rvt") and not link.IsNestedLink:
+            if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
+                link.Unload(None)
+                rvt_unloaded += 1
+        elif ".ifc" in link_name:
+            doc.Delete(l_id)
+            links_removed += 1
+    except: pass
+
+link_categories = [CADLinkType, PointCloudType, CoordinationModelType, TopographyLinkType]
+for cat in link_categories:
+    try:
+        cat_ids = FilteredElementCollector(doc).OfClass(cat).ToElementIds()
+        for c_id in cat_ids:
+            try:
+                doc.Delete(c_id)
+                links_removed += 1
+            except: pass
+    except: pass
+
+try:
+    import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
+    for inst_id in import_instances:
+        try:
+            doc.Delete(inst_id)
+            links_removed += 1
+        except: pass
+except: pass
+
+TransactionManager.Instance.TransactionTaskDone()
+
+# =========================================================================
+# PHASE 3: CONFIGURE TARGET DELIVERY VIEWS & GENERATE TEMPLATES
+# =========================================================================
+TransactionManager.Instance.EnsureInTransaction(doc)
+try:
+    existing_3d_views = FilteredElementCollector(doc).OfClass(View3D).ToElements()
+    all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
+    
+    for name in TARGET_NAMES:
+        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
+        
+        if view_3d:
+            # Buscar se já existe um View Template com o mesmo nome exato
+            template = next((t for t in all_templates if t.Name.upper() == name), None)
+            
+            # Se não existir o View Template, cria a partir da vista 3D alvo
+            if not template:
+                template = view_3d.CreateViewTemplate()
+                template.Name = name
+                
+            if template:
+                created_elements_ids.Add(template.Id)
+                view_3d.ViewTemplateId = template.Id
+                apply_strict_filters(doc, template)
+                
+            apply_strict_filters(doc, view_3d)
+except: pass
+TransactionManager.Instance.TransactionTaskDone()
+
+# =========================================================================
+# PHASE 4: RECURSIVE SUPER PURGE (DATABASE GARBAGE COLLECTION)
+# =========================================================================
+loop_safety = 0
+max_loops = 10 
+
+while loop_safety < max_loops:
+    TransactionManager.Instance.EnsureInTransaction(doc)
+    try:
+        unused_ids = doc.GetUnusedElements(System.Collections.Generic.HashSet[ElementId]())
+    except:
+        TransactionManager.Instance.TransactionTaskDone()
+        break
+    
+    if not unused_ids or unused_ids.Count == 0:
+        TransactionManager.Instance.TransactionTaskDone()
+        break 
+        
+    purged_this_loop = 0
+    for e_id in unused_ids:
+        try:
+            doc.Delete(e_id)
+            total_purged += 1
+            purged_this_loop += 1
+        except: pass
+        
+    TransactionManager.Instance.TransactionTaskDone()
+    if purged_this_loop == 0:
+        break
+    loop_safety += 1
+
+# OUTPUT LOG PARA O DYNAMO
+OUT = "Limpeza Concluída: Vistas Deletadas: {}, Grupos: {}, Links/CADs Removidos: {}, Elementos Purgados: {}".format(views_deleted, groups_deleted, links_removed, total_purged)
 totalPurged = 0
 
 # =========================================================================
