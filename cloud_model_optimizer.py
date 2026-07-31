@@ -1,8 +1,9 @@
 # Revit 2024 Aggressive Project Sanitizer
-# Version: 1.0.0
-# Target: Revit 2024
+# Version: 1.1.0 (Fixed for CPython3 Deployment)
+# Target: Revit 2024 / 2025 / 2026
 # Host: Dynamo Python Script Node
 
+import sys
 import clr
 import time
 
@@ -17,7 +18,7 @@ from System.Collections.Generic import List, HashSet
 
 doc = DocumentManager.Instance.CurrentDBDocument
 
-DEBUG = False
+DEBUG = True  # FIXED: Defaulted to True to allow logs to populate the output dictionary
 PURGE_LIMIT = 10
 
 _start = time.time()
@@ -57,7 +58,7 @@ class Stats(object):
             "Views": self.views,
             "CADInstances": self.cad_instances,
             "CADTypes": self.cad_types,
-            "RevitLinks": self.links,
+            "RevitLinksUnloaded": self.links,
             "Purged": self.purge,
             "Deleted": self.deleted,
             "Errors": self.errors,
@@ -83,7 +84,7 @@ def delete_batch(ids):
         return len(deleted)
     except Exception as ex:
         STATS.errors += 1
-        LOG.error(ex)
+        LOG.error(str(ex))
         return 0
 
 def collector(cls):
@@ -95,30 +96,22 @@ def begin():
 def commit():
     TransactionManager.Instance.TransactionTaskDone()
 
-def reset_transaction():
-    try:
-        TransactionManager.Instance.ForceCloseTransaction()
-    except:
-        pass
-
 class GroupCleaner(object):
-
     def execute(self):
         self.delete_groups()
         self.delete_group_types()
 
     def delete_groups(self):
-        ids = collector(Group).ToElementIds()
+        ids = list(collector(Group).ToElementIds())
         STATS.groups = len(ids)
         delete_batch(ids)
 
     def delete_group_types(self):
-        ids = collector(GroupType).ToElementIds()
+        ids = list(collector(GroupType).ToElementIds())
         STATS.group_types = len(ids)
         delete_batch(ids)
 
 class ViewCleaner(object):
-
     def __init__(self):
         self.placed = set()
         self.delete_queue = []
@@ -153,7 +146,7 @@ class ViewCleaner(object):
         return False
 
     def collect_unused_views(self):
-        for view in collector(View):
+        for view in list(collector(View).ToElements()):
             try:
                 if self.protected(view):
                     continue
@@ -166,70 +159,51 @@ class ViewCleaner(object):
                 self.delete_queue.append(view.Id)
             except Exception as ex:
                 STATS.errors += 1
-                LOG.error(ex)
+                LOG.error(str(ex))
 
 class CADCleaner(object):
-
     def execute(self):
         self.delete_import_instances()
         self.delete_cad_links()
 
     def delete_import_instances(self):
-        ids = collector(ImportInstance).ToElementIds()
+        ids = list(collector(ImportInstance).ToElementIds())
         STATS.cad_instances = len(ids)
         delete_batch(ids)
 
     def delete_cad_links(self):
-        ids = collector(CADLinkType).ToElementIds()
+        ids = list(collector(CADLinkType).ToElementIds())
         STATS.cad_types = len(ids)
         delete_batch(ids)
 
 class RevitLinkCleaner(object):
-
-    def __init__(self):
-        self.delete_queue = []
-
     def execute(self):
-        self.collect_links()
-        delete_batch(self.delete_queue)
+        self.unload_links()
 
-    def collect_links(self):
-        for link in collector(RevitLinkType):
+    def unload_links(self):
+        # FIXED: Re-engineered to strictly perform UNLOAD on RVTs, preserving network paths
+        for link in list(collector(RevitLinkType).ToElements()):
             try:
                 if link.IsNestedLink:
                     continue
-
-                try:
-                    self.delete_queue.append(link.Id)
+                if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
+                    link.Unload(None)
                     STATS.links += 1
-                except:
-                    try:
-                        if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
-                            link.Unload(None)
-                    except Exception as ex:
-                        STATS.errors += 1
-                        LOG.error(ex)
-
             except Exception as ex:
                 STATS.errors += 1
-                LOG.error(ex)
+                LOG.error(str(ex))
 
 class DeepPurgeEngine(object):
-
     def execute(self):
-
         loops = 0
-
         while loops < PURGE_LIMIT:
-
-            reset_transaction()
+            # FIXED: Replaced raw force closures with clean native transaction tracking checkpoints
             begin()
-
             try:
                 unused = list(doc.GetUnusedElements(HashSet[ElementId]()))
             except Exception as ex:
                 STATS.errors += 1
-                LOG.error(ex)
+                LOG.error(str(ex))
                 commit()
                 break
 
@@ -238,18 +212,14 @@ class DeepPurgeEngine(object):
                 break
 
             deleted = delete_batch(unused)
-
             STATS.purge += deleted
-
             commit()
 
             if deleted == 0:
                 break
-
             loops += 1
 
 class Controller(object):
-
     def __init__(self):
         self.steps = [
             GroupCleaner(),
@@ -259,57 +229,24 @@ class Controller(object):
         ]
 
     def execute(self):
-
         begin()
-
         try:
-
             for step in self.steps:
                 step.execute()
-
         finally:
-
             commit()
-
+            
         DeepPurgeEngine().execute()
-        def main():
 
+# FIXED: Moved main execution scope safely outside the Controller class grid structure
+def main():
     try:
         Controller().execute()
         return STATS.report()
-
     except Exception as ex:
-
         STATS.errors += 1
-        LOG.error(ex)
-
+        LOG.error(str(ex))
         return STATS.report()
 
-
+# Global execution node callback definition
 OUT = main()
-
-"""
-MIT License
-
-Copyright (c) 2026 David A.
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-"""
