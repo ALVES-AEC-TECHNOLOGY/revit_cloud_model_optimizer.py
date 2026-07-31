@@ -1,63 +1,57 @@
-import sys
+```python
 import clr
-from Autodesk.Revit.DB import *
-
 clr.AddReference('RevitAPI')
-clr.AddReference('RevitServices')
-from RevitServices.Persistence import DocumentManager
-from RevitServices.Transactions import TransactionManager
+from Autodesk.Revit.DB import *
+import Autodesk
 
-clr.AddReference('System')
-from System.Collections.Generic import HashSet
+def delete_unused_views(doc):
+    collector = FilteredElementCollector(doc)
+    views = [e for e in collector.OfClass(View) if not e.IsTemplate and not e.IsPrintingView]
 
-# Initialize document and tracking variables
-doc = DocumentManager.Instance.CurrentDBDocument
-deleted_groups_count = 0
-total_purged_count = 0
-purge_cycles_count = 0
+    used_views = set()
+    sheets = FilteredElementCollector(doc).OfClass(Sheet).ToElements()
 
-# =========================================================================
-# BLOCK 1: GROUP CLEANING ONLY
-# =========================================================================
-TransactionManager.Instance.EnsureInTransaction(doc)
+    for sheet in sheets:
+        used_views.update(sheet.GetAllPlacedViews())
 
-# STEP 1: Delete Group Instances first to avoid deletion blocks
-group_instances = list(FilteredElementCollector(doc).OfClass(Group).ToElementIds())
-for gi_id in group_instances:
-    try:
-        doc.Delete(gi_id)
-    except:
-        pass
+    for view in views:
+        if view.Id not in used_views:
+            doc.Delete(view.Id)
 
-# STEP 2: Delete Group Types (Model and Annotation/Detail Groups) from Project Browser
-group_types = list(FilteredElementCollector(doc).OfClass(GroupType).ToElementIds())
-for gt_id in group_types:
-    try:
-        doc.Delete(gt_id)
-        deleted_groups_count += 1
-    except:
-        pass
+def delete_groups(doc):
+    collector = FilteredElementCollector(doc)
+    groups = [e for e in collector.OfClass(Group)]
 
-# Close the group cleanup transaction before starting the Purge loops
-TransactionManager.Instance.TransactionTaskDone()
+    for group in groups:
+        doc.Delete(group.Id)
 
+def unload_links(doc):
+    collector = FilteredElementCollector(doc).OfClass(RevitLinkType)
+    link_types = collector.ToElements()
 
-# =========================================================================
-# BLOCK 2: DEEP SUPER PURGE
-# =========================================================================
-while purge_cycles_count < 10:
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    
-    # Explicit C# HashSet syntax instantiation required by CPython3
-    empty_set = HashSet[ElementId]()
-    unused_elements = doc.GetUnusedElements(empty_set)
-    unused_ids = list(unused_elements)
-    
-    if not unused_ids or len(unused_ids) == 0:
-        TransactionManager.Instance.TransactionTaskDone()
-        break 
-        
-    purged_this_loop = 0
+    for link_type in link_types:
+        if not isinstance(link_type, RevitLinkInstance):
+            continue
+
+        link_instance = doc.GetElement(link_type.GetTargetId())
+        doc.Delete(link_instance.Id)
+
+def super_purge(doc):
+    uidoc = Autodesk.Revit.UI.DocumentManager.Instance.CurrentUIDocument
+    cmd_data = CommandData()
+    command = SuperPurgeCommand(cmd_data)
+    command.Execute()
+
+def main():
+    doc = __revit__.ActiveUIDocument.Document
+    delete_unused_views(doc)
+    delete_groups(doc)
+    unload_links(doc)
+    super_purge(doc)
+
+if __name__ == '__main__':
+    main()
+```
     for e_id in unused_ids:
         try:
             doc.Delete(e_id)
