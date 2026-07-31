@@ -10,7 +10,7 @@ from RevitServices.Transactions import TransactionManager
 clr.AddReference('System')
 from System.Collections.Generic import HashSet
 
-# Initialize document and tracking variables (FIXED: Removed trailing parentheses from property)
+# Initialize document and tracking variables
 doc = DocumentManager.Instance.CurrentDBDocument
 created_elements_ids = HashSet[ElementId]()
 target_names = ["3D EMISSAO", "3D NAVIS"]
@@ -28,7 +28,6 @@ try:
     existing_3d_views = list(FilteredElementCollector(doc).OfClass(View3D).ToElements())
     existing_3d_names = [str(view.Name).upper() for view in existing_3d_views]
 
-    # FIXED: Replaced non-existent ViewFamilyTypeOfClass() function with standard collector syntax
     view_3d_types = list(FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements())
     default_3d_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
 
@@ -42,7 +41,7 @@ try:
             except:
                 pass
 
-    # Step 2: Delete Unwanted 3D Views (FIXED: Safe deletion collector logic avoiding scope errors)
+    # Step 2: Delete Unwanted 3D Views
     view_ids_to_delete = [v.Id for v in existing_3d_views if not (str(v.Name).upper() in target_names)]
     for view_id in view_ids_to_delete:
         try:
@@ -58,17 +57,16 @@ try:
     for gi_id in group_instances:
         try:
             doc.Delete(gi_id)
-        except Exception as e:
-            print(f"Failed to delete group instance {gi_id}: {str(e)}")
+        except:
+            pass
     
-    # FIXED: Replaced incorrect lambda filter with standard explicit GroupType class collector
     group_types = list(FilteredElementCollector(doc).OfClass(GroupType).ToElementIds())
     for gt_id in group_types:
         try:
             doc.Delete(gt_id)
             groups_deleted += 1
-        except Exception as e:
-            print(f"Failed to delete group type {gt_id}: {str(e)}")
+        except:
+            pass
 
     # Step 4: Manage Links (RVT Unload)
     rvt_links = list(FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements())
@@ -77,26 +75,26 @@ try:
             if not link.IsNestedLink and link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
                 link.Unload(None)
                 links_rvt_removed += 1
-        except Exception as e:
-            print(f"Failed to unload RVT link {link}: {str(e)}")
+        except:
+            pass
 
     # Step 5: Delete CAD/DWG and IFC Links (Instances first, then Types)
     cad_instances = list(FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds())
     for ci_id in cad_instances:
         try:
             doc.Delete(ci_id)
-        except Exception as e:
-            print(f"Failed to delete CAD instance {ci_id}: {str(e)}")
+        except:
+            pass
 
     cad_types = list(FilteredElementCollector(doc).OfClass(CADLinkType).ToElementIds())
     for ct_id in cad_types:
         try:
             doc.Delete(ct_id)
             links_ifc_removed += 1
-        except Exception as e:
-            print(f"Failed to delete IFC link {ct_id}: {str(e)}")
+        except:
+            pass
 
-    # FIXED: Crucial step closing general transaction block before launching Purge loop cycles
+    # Crucial step closing general transaction block before launching Purge loop cycles
     TransactionManager.Instance.TransactionTaskDone()
 
     # Step 6: Deep Super Purge Loop (Revit 2024+ CPython3 Compliant)
@@ -106,7 +104,7 @@ try:
 
         empty_set = HashSet[ElementId]()
         unused_elements = doc.GetUnusedElements(empty_set)
-        unused_ids = list(unused_elements)  # Convert to standard Python list
+        unused_ids = list(unused_elements)
 
         if not unused_ids or len(unused_ids) == 0:
             TransactionManager.Instance.TransactionTaskDone()
@@ -118,8 +116,8 @@ try:
                 doc.Delete(e_id)
                 total_purged += 1
                 deleted_this_loop += 1
-            except Exception as e:
-                print(f"Failed to delete element {e_id}: {str(e)}")
+            except:
+                pass
 
         TransactionManager.Instance.TransactionTaskDone()
         if deleted_this_loop == 0:
@@ -140,7 +138,6 @@ try:
     OUT = "\n".join(final_report)
 
 except Exception as ex:
-    # Ensure transaction is safely closed if a fatal exception occurs
     if TransactionManager.Instance.IsTransactionActive():
         TransactionManager.Instance.TransactionTaskDone()
     final_report = ["❌ FATAL ERROR EXECUTED: {}".format(str(ex))]
