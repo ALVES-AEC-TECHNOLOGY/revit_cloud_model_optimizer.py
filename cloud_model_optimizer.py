@@ -1,39 +1,89 @@
-# -*- coding: utf-8 -*-
-"""
-Script de Limpeza de Modelo, Auditoria e Emissão BIM
-Autor: ALVES AEC TECHNOLOGY
-Descrição: Deleta vistas redundantes (preserva folhas e templates existentes),
-             descarrega links, cria e configura as vistas de entrega 3D NAVIS e 3D EMISSAO 
-             junto com seus View Templates e executa o comando Purge recursivo na base de dados.
-"""
-
 import sys
 import clr
-
-# Importar Elementos da API do Revit
-clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import *
 
-# Importar Serviços de Transação e Documento do Dynamo
+clr.AddReference('RevitAPI')
 clr.AddReference('RevitServices')
-import RevitServices
 from RevitServices.Persistence import DocumentManager
 from RevitServices.Transactions import TransactionManager
 
-# Importar Coleções do .NET System
 clr.AddReference('System')
-import System
 from System.Collections.Generic import HashSet
 
-# INICIALIZAÇÃO
+# Initialize document and tracking variables
 doc = DocumentManager.Instance.CurrentDBDocument
+deleted_groups_count = 0
+total_purged_count = 0
+purge_cycles_count = 0
 
-# Contadores de performance para o log final do Dynamo
-groups_deleted = 0
-views_deleted = 0
-templates_deleted = 0
-rvt_unloaded = 0
-links_removed = 0
+# =========================================================================
+# BLOCK 1: GROUP CLEANING ONLY
+# =========================================================================
+TransactionManager.Instance.EnsureInTransaction(doc)
+
+# STEP 1: Delete Group Instances first to avoid deletion blocks
+group_instances = list(FilteredElementCollector(doc).OfClass(Group).ToElementIds())
+for gi_id in group_instances:
+    try:
+        doc.Delete(gi_id)
+    except:
+        pass
+
+# STEP 2: Delete Group Types (Model and Annotation/Detail Groups) from Project Browser
+group_types = list(FilteredElementCollector(doc).OfClass(GroupType).ToElementIds())
+for gt_id in group_types:
+    try:
+        doc.Delete(gt_id)
+        deleted_groups_count += 1
+    except:
+        pass
+
+# Close the group cleanup transaction before starting the Purge loops
+TransactionManager.Instance.TransactionTaskDone()
+
+
+# =========================================================================
+# BLOCK 2: DEEP SUPER PURGE
+# =========================================================================
+while purge_cycles_count < 10:
+    TransactionManager.Instance.EnsureInTransaction(doc)
+    
+    # Explicit C# HashSet syntax instantiation required by CPython3
+    empty_set = HashSet[ElementId]()
+    unused_elements = doc.GetUnusedElements(empty_set)
+    unused_ids = list(unused_elements)
+    
+    if not unused_ids or len(unused_ids) == 0:
+        TransactionManager.Instance.TransactionTaskDone()
+        break 
+        
+    purged_this_loop = 0
+    for e_id in unused_ids:
+        try:
+            doc.Delete(e_id)
+            purged_this_loop += 1
+            total_purged_count += 1
+        except:
+            pass
+            
+    TransactionManager.Instance.TransactionTaskDone()
+    if purged_this_loop == 0: 
+        break
+    purge_cycles_count += 1
+
+# =========================================================================
+# OUTPUT REPORT
+# =========================================================================
+final_report = [
+    "🔥 CLEANING COMPLETED 🔥",
+    "-" * 45,
+    "• Group Types deleted from Browser: {}".format(deleted_groups_count),
+    "• Total redundant items Purged: {}".format(total_purged_count),
+    "• Purge loop execution cycles: {}".format(purge_cycles_count),
+    "-" * 45
+]
+
+OUT = "\n".join(final_report)
 total_purged = 0
 
 # CONFIGURAÇÃO DE NOMES ALVO (EM MAIÚSCULAS)
