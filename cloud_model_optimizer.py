@@ -1,225 +1,245 @@
+# -*- coding: utf-8 -*-
+"""
+Script de Limpeza de Modelo, Auditoria e Emissão BIM
+Autor: ALVES AEC TECHNOLOGY
+Descrição: Deleta vistas redundantes (preserva folhas e templates existentes),
+             descarrega links, cria e configura as vistas de entrega 3D NAVIS e 3D EMISSAO 
+             junto com seus View Templates e executa o comando Purge recursivo na base de dados.
+"""
+
 import sys
 import clr
+
+# Importar Elementos da API do Revit
 clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import *
 
-# .NET Support required for CPython3
-clr.AddReference('System')
-import System
-from System.Collections.Generic import HashSet
-
+# Importar Serviços de Transação e Documento do Dynamo
 clr.AddReference('RevitServices')
 import RevitServices
 from RevitServices.Persistence import DocumentManager
 from RevitServices.Transactions import TransactionManager
 
-# Document Initialization
+# Importar Coleções do .NET System
+clr.AddReference('System')
+import System
+from System.Collections.Generic import HashSet
+
+# INICIALIZAÇÃO
 doc = DocumentManager.Instance.CurrentDBDocument
 
-deleted_groups_count = 0
-deleted_views_count = 0
-unloaded_rvt_count = 0
-removed_links_count = 0
-total_purged_count = 0
-purge_cycles_count = 0
+# Contadores de performance para o log final do Dynamo
+groups_deleted = 0
+views_deleted = 0
+templates_deleted = 0
+rvt_unloaded = 0
+links_removed = 0
+total_purged = 0
+
+# CONFIGURAÇÃO DE NOMES ALVO (EM MAIÚSCULAS)
+TARGET_NAMES = ["3D EMISSAO", "3D NAVIS"]
+created_elements_ids = HashSet[ElementId]()
 
 # =========================================================================
-# BLOCK 1: DELETIONS AND GENERAL MODEL CLEANING
+# FUNÇÃO AUXILIAR: CONFIGURAÇÃO DE CROP, ANOTAÇÕES E VISIBILIDADE
 # =========================================================================
-TransactionManager.Instance.EnsureInTransaction(doc)
-
-# STEP 1: Delete Model & Detail Groups from the Project Browser
-group_ids = list(FilteredElementCollector(doc).OfClass(GroupType).ToElementIds())
-for g_id in group_ids:
+def apply_strict_filters(document, view_or_template):
+    if not view_or_template:
+        return
     try:
-        doc.Delete(g_id)
-        deleted_groups_count += 1
-    except:
+        # Forçar desligamento da Região de Recorte (Crop Box)
+        view_or_template.CropBoxActive = False
+        view_or_template.CropBoxVisible = False
+        
+        # Ocultar todas as categorias de anotação (Annotations)
+        view_or_template.AreAnnotationCategoriesHidden = True
+        
+        # Ocultar automaticamente Worksets técnicos com o token "(HIDE)" no nome
+        if document.IsWorkshared:
+            worksets_collector = FilteredWorksetCollector(document).OfKind(WorksetKind.UserWorkset)
+            for wk in worksets_collector:
+                if "(HIDE)" in wk.Name.upper():
+                    view_or_template.SetWorksetVisibility(wk.Id, WorksetVisibility.Hidden)
+    except: 
         pass
 
-# STEP 2: Clean Unplaced Views Using a Temporary Internal Schedule
-views_to_delete_from_schedule = set()
-temp_schedule = None
-
+# =========================================================================
+# PRÉ-FASE: CRIAÇÃO ANTECIPADA DAS VISTAS DE ENTREGA (PREVENÇÃO DE ERROS)
+# =========================================================================
+TransactionManager.Instance.EnsureInTransaction(doc)
 try:
-    # 2.1 Create a temporary View Schedule in the model
-    temp_schedule = ViewSchedule.CreateSchedule(doc, ElementId(BuiltInCategory.OST_Views))
-    temp_schedule.Name = "### TEMP_SCHEDULE_AUTOMATIC_CLEANUP ###"
+    view_3d_types = FilteredElementCollector(doc).OfClass(ViewFamilyType).ToElements()
+    view_3d_family_type = next((t for t in view_3d_types if t.ViewFamily == ViewFamily.ThreeD), None)
     
-    # 2.2 Add the "Sheet Number" field to the schedule definition
-    definition = temp_schedule.Definition
-    sheet_num_field = None
+    existing_3d_views = FilteredElementCollector(doc).OfClass(View3D).ToElements()
     
-    for sched_field in definition.GetSchedulableFields():
-        if sched_field.ParameterId == ElementId(BuiltInParameter.VIEWPORT_SHEET_NUMBER):
-            sheet_num_field = definition.AddField(sched_field)
-            break
-            
-    # 2.3 Apply the schedule filter: "Sheet Number" EQUALS "" (Empty / Not on sheet)
-    if sheet_num_field:
-        schedule_filter = ScheduleFilter(sheet_num_field.FieldId, ScheduleFilterType.Equal, "")
-        definition.AddFilter(schedule_filter)
+    for name in TARGET_NAMES:
+        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
         
-    # 2.4 Force Revit to regenerate database and collect resulting elements from the schedule
-    doc.Regenerate()
-    schedule_collector = FilteredElementCollector(doc, temp_schedule.Id).ToElementIds()
-    
-    for v_id in schedule_collector:
-        views_to_delete_from_schedule.add(v_id)
+        if not view_3d and view_3d_family_type:
+            view_3d = View3D.CreateIsometric(doc, view_3d_family_type.Id)
+            view_3d.Name = name
         
-except:
+        if view_3d:
+            created_elements_ids.Add(view_3d.Id)
+except: 
     pass
+TransactionManager.Instance.TransactionTaskDone()
 
-# 2.5 Execute the deletion loop on the collected views
-view_ids = list(FilteredElementCollector(doc).OfClass(View).ToElementIds())
+# =========================================================================
+# FASE 1: LIMPEZA DE VISTAS ESTÁTICAS E GRUPOS (PRESERVAÇÃO DE FOLHAS)
+# =========================================================================
+view_ids = FilteredElementCollector(doc).OfClass(View).ToElementIds()
+
+TransactionManager.Instance.EnsureInTransaction(doc)
+
 for v_id in view_ids:
     try:
         view = doc.GetElement(v_id)
         if view is None:
             continue
             
-        # PROTECTION: If it is a View Template, SKIP (Never delete)
+        if view.ViewType in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
+            continue
+            
         if view.IsTemplate:
-            continue
+            continue 
+
+        valid_view_types = [
+            ViewType.FloorPlan, ViewType.CeilingPlan, ViewType.Elevation, 
+            ViewType.Section, ViewType.Detail, ViewType.ThreeD, ViewType.EngineeringPlan
+        ]
+        
+        if view.ViewType in valid_view_types:
+            v_name_upper = view.Name.upper()
             
-        # Ignore schedules, sheets, and critical internal system views
-        v_type = view.ViewType
-        if v_type in [ViewType.Schedule, ViewType.Internal, ViewType.ProjectBrowser, ViewType.DrawingSheet]:
-            continue
-
-        # ENCODING FIX: Convert view name to clean ASCII string, stripping out special characters
-        raw_name = str(view.Name).upper()
-        v_name = raw_name.encode('ascii', 'ignore').decode('ascii')
-
-        # EXCLUSIVE RULE FOR 3D VIEWS (Keep only the required manual emissions views)
-        if v_type == ViewType.ThreeD:
-            if "3D EMISSAO" in v_name or "3D NAVIS" in v_name:
+            if v_name_upper in TARGET_NAMES:
                 continue 
-            doc.Delete(v_id)
-            deleted_views_count += 1
-            continue
-
-        # RULE FOR 2D VIEWS (Plans, Sections, Elevations) caught by the temporary schedule
-        if v_id in views_to_delete_from_schedule:
-            # Protection against views generating dependent views (Parent Views)
-            dependent_ids = list(view.GetDependentViewIds())
-            if len(dependent_ids) > 0:
-                continue
                 
-            if not view.CanBeDeleted():
-                continue
-                
-            doc.Delete(v_id)
-            deleted_views_count += 1
+            is_on_sheet = view.SheetId != ElementId.InvalidElementId
             
-    except:
+            if view.ViewType == ViewType.ThreeD or not is_on_sheet:
+                if view.CanBeDeleted() and v_id not in created_elements_ids:
+                    doc.Delete(v_id)
+                    views_deleted += 1
+                    
+    except: 
         pass
 
-# 2.6 Delete the temporary schedule to leave no traces in the Project Browser
-if temp_schedule:
-    try:
-        doc.Delete(temp_schedule.Id)
-    except:
-        pass
-
-# STEP 3: Manage Document Links
-# 3.1 Unload Revit Links (RVT)
-rvt_links = list(FilteredElementCollector(doc).OfClass(RevitLinkType).ToElements())
-for link in rvt_links:
-    try:
-        if not link.IsNestedLink and link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
-            link.Unload(None)
-            unloaded_rvt_count += 1
-    except:
-        pass
-
-# 3.2 Remove CAD Imports/Links (DWG)
 try:
-    cad_ids = list(FilteredElementCollector(doc).OfClass(CADLinkType).ToElementIds())
-    for c_id in cad_ids:
+    group_ids = FilteredElementCollector(doc).OfClass(GroupType).ToElementIds()
+    for g_id in group_ids:
         try:
-            doc.Delete(c_id)
-            removed_links_count += 1
-        except:
-            pass
-except:
-    pass
+            doc.Delete(g_id)
+            groups_deleted += 1
+        except: pass
+except: pass
 
-# 3.3 Remove Point Clouds
-try:
-    pc_ids = list(FilteredElementCollector(doc).OfClass(PointCloudType).ToElementIds())
-    for p_id in pc_ids:
-        try:
-            doc.Delete(p_id)
-            removed_links_count += 1
-        except:
-            pass
-except:
-    pass
-
-# 3.4 Remove Coordination Models (Navisworks) and Topography Links
-# FIXED: Safe type name validation using clean strings to avoid CoordinationModelType NameError
-try:
-    all_types = list(FilteredElementCollector(doc).OfClass(ElementType).ToElements())
-    for type_elem in all_types:
-        try:
-            class_string_name = str(type_elem.GetType().Name)
-            if "CoordinationModelType" in class_string_name or "TopographyLinkType" in class_string_name:
-                doc.Delete(type_elem.Id)
-                removed_links_count += 1
-        except:
-            pass
-except:
-    pass
-
-# Close Block 1 transaction to update database records before starting Purge
 TransactionManager.Instance.TransactionTaskDone()
 
+# =========================================================================
+# FASE 2: LIMPEZA AUTOMÁTICA DE VÍNCULOS EXTERNOS E CADS
+# =========================================================================
+TransactionManager.Instance.EnsureInTransaction(doc)
 
-# =========================================================================
-# BLOCK 2: DEEP SUPER PURGE OBSCURE/UNUSED ELEMENTS
-# =========================================================================
-while purge_cycles_count < 10:
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    
-    # Explicit C# HashSet syntax instantiation required by CPython3
-    empty_set = HashSet[ElementId]()
-    unused_elements = doc.GetUnusedElements(empty_set)
-    unused_ids = list(unused_elements)
-    
-    if not unused_ids or len(unused_ids) == 0:
-        TransactionManager.Instance.TransactionTaskDone()
-        break 
-        
-    purged_this_loop = 0
-    for e_id in unused_ids:
-        try:
-            doc.Delete(e_id)
-            purged_this_loop += 1
-            total_purged_count += 1
-        except:
-            pass
+link_ids = FilteredElementCollector(doc).OfClass(RevitLinkType).ToElementIds()
+
+for l_id in link_ids:
+    try:
+        link = doc.GetElement(l_id)
+        if link is None:
+            continue
             
-    TransactionManager.Instance.TransactionTaskDone()
-    if purged_this_loop == 0: 
+        link_name = Element.Name.GetValue(link).lower()
+        
+        if link_name.endswith(".rvt") and not link.IsNestedLink:
+            if link.GetLinkedFileStatus() == LinkedFileStatus.Loaded:
+                link.Unload(None)
+                rvt_unloaded += 1
+        elif ".ifc" in link_name:
+            doc.Delete(l_id)
+            links_removed += 1
+    except: pass
+
+link_categories = [CADLinkType, PointCloudType, CoordinationModelType, TopographyLinkType]
+for cat in link_categories:
+    try:
+        cat_ids = FilteredElementCollector(doc).OfClass(cat).ToElementIds()
+        for c_id in cat_ids:
+            try:
+                doc.Delete(c_id)
+                links_removed += 1
+            except: pass
+    except: pass
+
+try:
+    import_instances = FilteredElementCollector(doc).OfClass(ImportInstance).ToElementIds()
+    for inst_id in import_instances:
+        try:
+            doc.Delete(inst_id)
+            links_removed += 1
+        except: pass
+except: pass
+
+TransactionManager.Instance.TransactionTaskDone()
+
+# =========================================================================
+# FASE 3: ASSOCIAÇÃO DAS VISTAS ALVO AOS RESPECTIVOS VIEW TEMPLATES
+# =========================================================================
+TransactionManager.Instance.EnsureInTransaction(doc)
+try:
+    existing_3d_views = FilteredElementCollector(doc).OfClass(View3D).ToElements()
+    all_templates = [v for v in FilteredElementCollector(doc).OfClass(View).ToElements() if v.IsTemplate]
+    
+    for name in TARGET_NAMES:
+        view_3d = next((v for v in existing_3d_views if v.Name.upper() == name), None)
+        
+        if view_3d:
+            template = next((t for t in all_templates if t.Name.upper() == name), None)
+            
+            if not template:
+                template = view_3d.CreateViewTemplate()
+                template.Name = name
+                
+            if template:
+                created_elements_ids.Add(template.Id)
+                view_3d.ViewTemplateId = template.Id
+                apply_strict_filters(doc, template)
+                
+            apply_strict_filters(doc, view_3d)
+except: pass
+TransactionManager.Instance.TransactionTaskDone()
+
+# =========================================================================
+# FASE 4: SUPER PURGE RECURSIVO (COLETA DE LIXO DA BASE DE DADOS BIM)
+# =========================================================================
+loop_safety = 0
+max_loops = 10 
+
+while loop_safety < max_loops:
+    TransactionManager.Instance.EnsureInTransaction(doc)
+    purged_this_loop = 0
+    try:
+        unused_ids = doc.GetUnusedElements(System.Collections.Generic.HashSet[ElementId]())
+        if not unused_ids or unused_ids.Count == 0:
+            TransactionManager.Instance.TransactionTaskDone()
+            break
+            
+        for e_id in unused_ids:
+            try:
+                doc.Delete(e_id)
+                total_purged += 1
+                purged_this_loop += 1
+            except: 
+                pass
+    except:
+        TransactionManager.Instance.TransactionTaskDone()
         break
-    purge_cycles_count += 1
+        
+    TransactionManager.Instance.TransactionTaskDone()
+    if purged_this_loop == 0:
+        break
+    loop_safety += 1
 
-# =========================================================================
-# OUT SYSTEM OUTPUT FOR DYNAMO WINDOW
-# =========================================================================
-final_report = [
-    "🔥 MASTER CLEANING SCRIPT EXECUTED SUCCESSFULLY 🔥",
-    "-" * 50,
-    "• Group Types deleted from Project Browser: {}".format(deleted_groups_count),
-    "• View Templates preserved: ALL",
-    "• Unplaced views deleted (3D extras + unplaced 2D): {}".format(deleted_views_count),
-    "• Revit Links unloaded (RVT Unload): {}".format(unloaded_rvt_count),
-    "• Removed Links/Imports (DWG, PointCloud, NWD, Topo): {}".format(removed_links_count),
-    "• Total redundant elements deleted in Super Purge: {}".format(total_purged_count),
-    "• Purge loop execution cycles: {}".format(purge_cycles_count),
-    "-" * 50,
-    "Model database fully optimized!"
-]
-
-OUT = "\n".join(final_report)
+# SAÍDA DE LOG DE PERFORMANCE PARA O NODE DO DYNAMO
+OUT = "Otimizacao ALVES AEC - Vistas Limpas: {}, Grupos Removidos: {}, Vinculos Removidos: {}, Itens Purgados: {}".format(views_deleted, groups_deleted, links_removed, total_purged)
